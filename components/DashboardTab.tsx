@@ -3,10 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { MessageCircle, Brain, Sparkles, TrendingUp, TrendingDown, Wallet, Lightbulb, Edit2, Trash2, X, Check, Calendar, Tag, HelpCircle, AlertTriangle, DollarSign } from 'lucide-react';
 import { Transaction, ChatMessage, agruparTransaccionesPorFecha } from '../lib/types';
-import { useChatHybrid } from '../hooks/useChatHybrid';
 import { useSimpleAdaptedData } from '../hooks/useSimpleAdaptedData';
-import ChatInputWithVoice from './ui/ChatInputWithVoice';
-import AICard from './ui/AICard';
 
 const getEmojiCategoria = (categoria: string): string => {
   const mapa: Record<string, string> = {

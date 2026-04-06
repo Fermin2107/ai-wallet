@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { TrendingUp, AlertTriangle, DollarSign, Edit2, Check, X, Calendar } from 'lucide-react';
 import { useSimpleSupabase } from '../hooks/useSimpleSupabase';
 import { useSimpleAdaptedData } from '../hooks/useSimpleAdaptedData';
@@ -8,6 +8,7 @@ import { CATEGORIA_EMOJI } from '../lib/types';
 
 interface BudgetTabProps {
   selectedMonth?: string;
+  refreshTrigger?: number; // ← agregar
 }
 
 // 🆕 Función para obtener color según porcentaje gastado (Semáforo de Ansiedad)
@@ -107,9 +108,16 @@ const getEmojiForCategory = (category: string): string => {
   return categoryEmojiMap[normalizedCategory] || '📦';
 };
 
-export default function BudgetTabFinal({ selectedMonth }: BudgetTabProps) {
+export default function BudgetTabFinal({ selectedMonth, refreshTrigger }: BudgetTabProps) {
   const { budgets, loading, error, refresh, updateBudget, createBudget, deleteBudget } = useSimpleSupabase();
   const { transactions } = useSimpleAdaptedData(selectedMonth);
+  
+  // ← agregar efecto para refresh trigger
+  useEffect(() => {
+    if (refreshTrigger && refreshTrigger > 0) {
+      refresh();
+    }
+  }, [refreshTrigger]);
   
   // Debug temporal
   console.log('🔍 BudgetTabFinal - Estado:', { loading, error, budgetsCount: budgets?.length, transactionsCount: transactions?.length });
@@ -121,38 +129,43 @@ export default function BudgetTabFinal({ selectedMonth }: BudgetTabProps) {
   const [newBudget, setNewBudget] = useState({ category: '', limit: 0 });
   const [expandedBudget, setExpandedBudget] = useState<string | null>(null);;
 
+  const ALIASES: Record<string, string[]> = {
+    'alimentacion': ['super', 'supermercado', 'mercado', 'comida', 'almacen', 
+                     'verduleria', 'carniceria', 'panaderia', 'kiosco', 'delivery'],
+    'transporte':   ['nafta', 'colectivo', 'subte', 'uber', 'taxi', 'remis', 
+                     'sube', 'combustible', 'peaje'],
+    'salidas':      ['bar', 'restaurant', 'restaurante', 'cine', 'teatro', 
+                     'boliche', 'entretenimiento', 'salida'],
+    'salud':        ['farmacia', 'medico', 'dentista', 'clinica', 'prepaga'],
+    'servicios':    ['luz', 'gas', 'agua', 'internet', 'telefono', 'expensas'],
+  }
+
+  const categoriasMatch = (budgetCategory: string, txCategory: string): boolean => {
+    const bc = budgetCategory.toLowerCase().trim()
+    const tc = txCategory.toLowerCase().trim()
+    if (bc === tc) return true
+    if (tc.includes(bc) || bc.includes(tc)) return true
+    return ALIASES[bc]?.includes(tc) ?? false
+  }
+
   // 🔄 Calcular gastado por límite usando month_period (lógica correcta)
   const getSpentByCategory = (budget: any) => {
     if (!transactions) return 0;
     
-    const normalizedBudgetCategory = budget.category.toLowerCase().trim();
     const targetMonth = selectedMonth || new Date().toISOString().slice(0, 7);
     
     return transactions
       .filter(t => {
-        // Verificar que la categoría coincida
-        const normalizedTransactionCategory = (typeof t.categoria === 'string' ? t.categoria : t.categoria?.nombre || '').toLowerCase().trim();
-        const categoryMatches = normalizedTransactionCategory === normalizedBudgetCategory;
-        
-        // Verificar que la fecha de la transacción pertenezca al month_period del límite
-        const transactionDate = t.fecha;
-        const transactionMonth = transactionDate ? transactionDate.slice(0, 7) : null; // YYYY-MM
-        const monthMatches = transactionMonth === targetMonth;
-        
-        // Solo contar gastos
-        const isExpense = t.tipo === 'gasto';
-        
-        console.log('🔍 Filtrando transacción:', {
-          descripcion: t.descripcion,
-          categoryMatches,
-          transactionMonth,
-          budgetMonthPeriod: targetMonth,
-          monto: t.monto
-        });
-        
-        return categoryMatches && monthMatches && isExpense;
+        // Verificar que la categoría coincida con fuzzy matching
+        const txCat = typeof t.categoria === 'string' 
+          ? t.categoria 
+          : t.categoria?.id || t.categoria?.nombre || ''
+        const monthOk = t.fecha?.startsWith(targetMonth)
+        const catOk = categoriasMatch(budget.category, txCat)
+        const isExpense = t.tipo === 'gasto'
+        return catOk && monthOk && isExpense
       })
-      .reduce((sum, t) => sum + (t.monto || 0), 0);
+      .reduce((sum, t) => sum + (Number(t.monto) || 0), 0)
   };
 
   // Función para actualizar límite

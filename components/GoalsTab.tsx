@@ -6,10 +6,18 @@ import { useSimpleSupabase } from '../hooks/useSimpleSupabase';
 
 interface GoalsTabProps {
   selectedMonth?: string;
+  refreshTrigger?: number; // ← agregar
 }
 
-export default function GoalsTabSimple({ selectedMonth }: GoalsTabProps) {
+export default function GoalsTabSimple({ selectedMonth, refreshTrigger }: GoalsTabProps) {
   const { goals, loading, error, refresh, updateGoal, createGoal } = useSimpleSupabase();
+  
+  // ← agregar efecto para refresh trigger
+  useEffect(() => {
+    if (refreshTrigger && refreshTrigger > 0) {
+      refresh();
+    }
+  }, [refreshTrigger]);
   
   // Debug temporal
   console.log('🔍 GoalsTab - Estado:', { loading, error, goalsCount: goals?.length });

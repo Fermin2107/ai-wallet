@@ -13,6 +13,7 @@ import { supabase } from '../lib/supabase';
 export default function Home() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [metasSubTab, setMetasSubTab] = useState<'metas' | 'limites'>('metas');
+  const [refreshTrigger, setRefreshTrigger] = useState(0); // ← agregar trigger
   
   // 📅 Estado para el selector de meses
   const [selectedMonth, setSelectedMonth] = useState(() => {
@@ -104,6 +105,7 @@ useEffect(() => {
       return (
         <ChatTab
           selectedMonth={selectedMonth}
+          onDataChanged={() => setRefreshTrigger(t => t + 1)}
         />
       )
     case 'metas':
@@ -134,8 +136,8 @@ useEffect(() => {
             </button>
           </div>
           {metasSubTab === 'metas'
-            ? <GoalsTab selectedMonth={selectedMonth} />
-            : <BudgetTab selectedMonth={selectedMonth} />
+            ? <GoalsTab selectedMonth={selectedMonth} refreshTrigger={refreshTrigger} />
+            : <BudgetTab selectedMonth={selectedMonth} refreshTrigger={refreshTrigger} />
           }
         </div>
       )

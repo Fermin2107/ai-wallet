@@ -32,7 +32,7 @@ CAPACIDADES:
 Si el usuario menciona un gasto o ingreso, extraé:
 - monto (número)
 - categoría: si el usuario tiene límites definidos (los ves en el contexto bajo 'budgets'), usá exactamente esos nombres para que matchee. Si no matchea con ninguno, usá el nombre más descriptivo en minúsculas sin espacios ni acentos (ej: 'mascotas', 'farmacia', 'gym', 'ropa'). Como último recurso usá 'otros'.
-- fecha (hoy si no especifica)
+- transaction_date: usá SIEMPRE la fecha de hoy que está en FECHA DE HOY, salvo que el usuario diga explícitamente otra fecha
 - descripción breve
 
 Respondé confirmando el registro con una observación 
@@ -195,11 +195,20 @@ async function saveTransactionsToSupabase(
       
       console.log('🎯 Buscando budget para categoria:', tx.category || tx.categoria)
       
-      // Buscar budget correspondiente
+      // Buscar budget correspondiente con fuzzy match
       const budgetMatch = budgetsData?.find(b => {
-        const match = b.category === txCategory
-        console.log(`🎯 Comparando budget: "${b.category}" con tx: "${txCategory}" → ${match ? 'MATCH' : 'NO MATCH'}`)
-        return match
+        if (b.category === txCategory) return true
+        // Fuzzy: si la categoría del tx está contenida en el nombre del budget o viceversa
+        if (txCategory.includes(b.category) || b.category.includes(txCategory)) return true
+        // Aliases comunes
+        const aliases: Record<string, string[]> = {
+          'alimentacion': ['super', 'supermercado', 'mercado', 'comida', 'almacen', 'verduleria', 'carniceria', 'panaderia'],
+          'transporte':   ['nafta', 'colectivo', 'subte', 'uber', 'taxi', 'remis', 'sube'],
+          'salidas':      ['bar', 'restaurant', 'cine', 'teatro', 'boliche', 'entretenimiento'],
+          'salud':        ['farmacia', 'medico', 'dentista', 'clinica'],
+          'servicios':    ['luz', 'gas', 'agua', 'internet', 'telefono'],
+        }
+        return aliases[b.category]?.includes(txCategory) ?? false
       });
       
       console.log('🎯 Budget match:', budgetMatch?.id || 'NO ENCONTRADO')
@@ -828,6 +837,9 @@ export async function POST(request: NextRequest) {
     // Construir el system prompt con contexto dinámico
     const systemPromptConContexto = `${SYSTEM_PROMPT}
 
+FECHA DE HOY: ${new Date().toISOString().split('T')[0]}
+// Usá SIEMPRE esta fecha para transaction_date salvo que el usuario especifique otra.
+
 DATOS ACTUALES DEL USUARIO:
 - Ingreso mensual: $${context?.ingreso_mensual?.toLocaleString('es-AR') ?? 'no especificado'}
 - Objetivo de ahorro: $${context?.objetivo_ahorro?.toLocaleString('es-AR') ?? 'no especificado'}
@@ -838,6 +850,11 @@ METAS ACTIVAS:
 ${context?.goals?.map((g: any) => 
   `- ${g.nombre}: $${g.actual?.toLocaleString('es-AR')} de $${g.objetivo?.toLocaleString('es-AR')} (falta $${g.faltante?.toLocaleString('es-AR')})` 
 ).join('\n') ?? 'Sin metas'}
+
+CATEGORÍAS DISPONIBLES (usá EXACTAMENTE estos nombres, sin variaciones):
+${context?.budgets?.map((b: any) => 
+  `- "${b.categoria}"` 
+).join('\n') ?? 'Sin categorías definidas'}
 
 LÍMITES POR CATEGORÍA:
 ${context?.budgets?.map((b: any) => 
