@@ -1,0 +1,121 @@
+// ========================================
+// AI Wallet - Cliente Supabase Singleton Real
+// ========================================
+// Archivo: lib/supabase.ts
+// Propósito: Singleton real de Supabase - UNA sola instancia global
+// Author: SRE Full-Stack Developer
+// ========================================
+
+import { createBrowserClient } from '@supabase/ssr'
+import { createClient, SupabaseClient } from '@supabase/supabase-js'
+
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+
+// ✅ Singleton usando @supabase/ssr — lee la sesión desde cookies, igual que el middleware
+let browserClient: SupabaseClient | null = null
+
+export const getSupabaseClient = (): SupabaseClient => {
+  if (!browserClient) {
+    browserClient = createBrowserClient(url, anonKey)
+    console.log('🔧 Supabase browser client created (SSR-compatible)')
+  }
+  return browserClient
+}
+
+export const supabase = getSupabaseClient()
+
+// Cliente para el lado del servidor (API routes)
+export const createSupabaseServerClient = (): SupabaseClient => {
+  return createClient(url, anonKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false
+    }
+  });
+};
+
+// Nuevo: cliente autenticado con token del usuario
+export const createSupabaseServerClientWithToken = (token: string): SupabaseClient => {
+  return createClient(url, anonKey, {
+    global: {
+      headers: { Authorization: `Bearer ${token}` }
+    },
+    auth: { persistSession: false, autoRefreshToken: false }
+  });
+};
+
+// Tipos para la tabla transactions
+export interface DatabaseTransaction {
+  id: string;
+  description: string;
+  amount: number;
+  category: string;
+  type: 'gasto' | 'ingreso';
+  transaction_date: string;
+  created_at: string;
+  updated_at: string;
+  confirmed: boolean;
+  source: 'voice' | 'text' | 'manual';
+  original_message?: string;
+  ai_confidence?: number;
+  user_id?: string;
+  budget_id?: string;
+  goal_id?: string;
+}
+
+// Tipos para inserción (sin campos auto-generados)
+export interface TransactionInsert {
+  description: string;
+  amount: number;
+  category: string;
+  type: 'gasto' | 'ingreso';
+  transaction_date?: string;
+  confirmed?: boolean;
+  source?: 'voice' | 'text' | 'manual';
+  original_message?: string;
+  ai_confidence?: number;
+  user_id?: string;
+  budget_id?: string;
+  goal_id?: string;
+}
+
+// Utilidades para manejo de errores
+export class SupabaseError extends Error {
+  constructor(
+    message: string,
+    public code?: string,
+    public details?: any
+  ) {
+    super(message);
+    this.name = 'SupabaseError';
+  }
+}
+
+// Función utilitaria para manejar errores de Supabase
+export const handleSupabaseError = (error: any): SupabaseError => {
+  console.error('Error de Supabase:', error);
+  
+  if (error.code) {
+    switch (error.code) {
+      case '23505':
+        return new SupabaseError('Registro duplicado', error.code, error.details);
+      case '23503':
+        return new SupabaseError('Violación de clave foránea', error.code, error.details);
+      case '23514':
+        return new SupabaseError('Violación de constraint', error.code, error.details);
+      case 'PGRST116':
+        return new SupabaseError('Registro no encontrado', error.code, error.details);
+      default:
+        return new SupabaseError(error.message || 'Error desconocido de Supabase', error.code, error.details);
+    }
+  }
+  
+  return new SupabaseError(error.message || 'Error desconocido de Supabase');
+};
+
+// Exportaciones por defecto
+export default getSupabaseClient;
+
+// Desconectar realtime completamente si no se usa
+supabase.realtime.disconnect();
