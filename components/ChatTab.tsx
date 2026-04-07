@@ -7,6 +7,7 @@ import { createBrowserClient } from '@supabase/ssr'
 interface ChatTabProps {
   selectedMonth: string
   onDataChanged?: () => void
+  onNavigateToBudgets?: () => void  // ← agregar
 }
 
 interface Message {
@@ -305,7 +306,7 @@ function getWelcome(ctx: ReturnType<typeof buildFinancialContext> | null): strin
 // ─── Componente principal ────────────────────────────────────
 const ACCIONES_QUE_MODIFICAN = ['INSERT_TRANSACTION', 'CREATE_GOAL', 'CREATE_BUDGET', 'UPDATE_GOAL_PROGRESS']
 
-export default function ChatTab({ selectedMonth, onDataChanged }: ChatTabProps) {
+export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudgets }: ChatTabProps) {
   const { transactions, budgets, goals, refresh } = useSimpleSupabase()
 
   const supabase = createBrowserClient(
@@ -318,6 +319,12 @@ export default function ChatTab({ selectedMonth, onDataChanged }: ChatTabProps) 
   const [isLoading, setIsLoading] = useState(false)
   const [ctx, setCtx] = useState<ReturnType<typeof buildFinancialContext> | null>(null)
   const [conversationHistory, setConversationHistory] = useState<Array<{role: 'user' | 'assistant', content: string}>>([])
+  // Estado para alerta de gasto inusual
+const [gastoInusualAlert, setGastoInusualAlert] = useState<{
+  categoria: string
+  gastoActual: number
+  promedioHistorico: number
+} | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -546,6 +553,33 @@ export default function ChatTab({ selectedMonth, onDataChanged }: ChatTabProps) 
 
       addMessage(data.mensaje_respuesta || 'No pude procesar tu mensaje', 'ai')
       
+      // ── Detección de gasto inusual ──
+if (data.action === 'INSERT_TRANSACTION' && data.data?.type === 'gasto') {
+  const categoria = data.data.category
+  const montoGasto = data.data.amount
+  
+  // Buscar promedio histórico de esa categoría desde el contexto
+  const contexto = buildBackendContext()
+  const categoriaHistorica = contexto.historico?.categorias?.find(
+    (c: any) => c.categoria === categoria
+  )
+  
+  if (categoriaHistorica && categoriaHistorica.promedio_mensual > 0) {
+    const ratio = montoGasto / categoriaHistorica.promedio_mensual
+    // Mostrar alerta si el gasto único es >40% del promedio mensual de esa categoría
+    // (o sea, si en un solo gasto casi iguala o supera lo que gasta en todo el mes)
+    if (ratio > 0.4) {
+      setGastoInusualAlert({
+        categoria,
+        gastoActual: montoGasto,
+        promedioHistorico: categoriaHistorica.promedio_mensual
+      })
+    } else {
+      setGastoInusualAlert(null)
+    }
+  }
+}
+      
       // ← NUEVO: agregar al historial
       setConversationHistory(prev => [
         ...prev,
@@ -647,7 +681,7 @@ export default function ChatTab({ selectedMonth, onDataChanged }: ChatTabProps) 
           </>
         )}
 
-        {messages.map(msg => (
+        {messages.map((msg, index) => (
           <div key={msg.id}>
             {msg.sender === 'user' ? (
               <div className="flex justify-end">
@@ -656,17 +690,34 @@ export default function ChatTab({ selectedMonth, onDataChanged }: ChatTabProps) 
                 </div>
               </div>
             ) : (
-              <div className="flex gap-2 items-end">
-                <div className="w-8 h-8 bg-[#00C853]/20 rounded-full flex items-center justify-center text-sm flex-shrink-0">🤖</div>
-                <div className="max-w-[85%]">
-                  <div className="bg-[#141A17] border border-white/5 rounded-2xl rounded-bl-sm px-4 py-3">
-                    <p className="text-white text-sm leading-relaxed">{msg.text}</p>
+              <>
+                <div className="flex gap-2 items-end">
+                  <div className="w-8 h-8 bg-[#00C853]/20 rounded-full flex items-center justify-center text-sm flex-shrink-0">🤖</div>
+                  <div className="max-w-[85%]">
+                    <div className="bg-[#141A17] border border-white/5 rounded-2xl rounded-bl-sm px-4 py-3">
+                      <p className="text-white text-sm leading-relaxed">{msg.text}</p>
+                    </div>
+                    {msg.isAuto && (
+                      <p className="text-white/20 text-[10px] mt-0.5 ml-1">respuesta instantánea</p>
+                    )}
                   </div>
-                  {msg.isAuto && (
-                    <p className="text-white/20 text-[10px] mt-0.5 ml-1">respuesta instantánea</p>
-                  )}
                 </div>
-              </div>
+                
+                {/* ← Alerta de gasto inusual — solo en el último mensaje de la IA */}
+                {index === messages.length - 1 && 
+                 msg.sender === 'ai' && 
+                 gastoInusualAlert && (
+                  <GastoInusualAlert
+                    categoria={gastoInusualAlert.categoria}
+                    gastoActual={gastoInusualAlert.gastoActual}
+                    promedioHistorico={gastoInusualAlert.promedioHistorico}
+                    onVerDetalle={() => {
+                      setGastoInusualAlert(null)
+                      onNavigateToBudgets?.()
+                    }}
+                  />
+                )}
+              </>
             )}
           </div>
         ))}
@@ -746,6 +797,48 @@ function MiniCard({ label, value, highlight }: { label: string; value: string; h
         highlight === 'red'   ? 'text-red-400' :
         'text-white'
       }`}>{value}</p>
+    </div>
+  )
+}
+
+// ─── Alerta de gasto inusual ─────────────────────────────────
+interface GastoInusualAlertProps {
+  categoria: string
+  gastoActual: number
+  promedioHistorico: number
+  onVerDetalle: () => void
+}
+
+function GastoInusualAlert({ categoria, gastoActual, promedioHistorico, onVerDetalle }: GastoInusualAlertProps) {
+  const veces = promedioHistorico > 0 
+    ? (gastoActual / promedioHistorico).toFixed(1) 
+    : '2+'
+  const fmt = (n: number) => `$${Math.round(n).toLocaleString('es-AR')}` 
+  
+  return (
+    <div className="ml-10 mt-1">
+      <div className="bg-yellow-500/8 border border-yellow-500/25 rounded-xl px-3 py-2.5">
+        <div className="flex items-start gap-2">
+          <span className="text-yellow-400 text-sm mt-0.5">⚠️</span>
+          <div className="flex-1 min-w-0">
+            <p className="text-yellow-400/90 text-xs font-medium">
+              Gasto inusual en {categoria}
+            </p>
+            <p className="text-yellow-400/60 text-xs mt-0.5">
+              Este gasto es {veces}x tu promedio histórico 
+              ({fmt(promedioHistorico)}/mes)
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={onVerDetalle}
+          className="mt-2 w-full text-xs text-yellow-400/70 hover:text-yellow-400 
+                     border border-yellow-500/20 hover:border-yellow-500/40 
+                     rounded-lg py-1.5 transition-colors"
+        >
+          Ver presupuesto de {categoria} →
+        </button>
+      </div>
     </div>
   )
 }

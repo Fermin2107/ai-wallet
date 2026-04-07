@@ -107,6 +107,10 @@ useEffect(() => {
         <ChatTab
           selectedMonth={selectedMonth}
           onDataChanged={() => setRefreshTrigger(t => t + 1)}
+          onNavigateToBudgets={() => {        // ← agregar
+            setActiveTab('metas')             // ← agregar
+            setMetasSubTab('limites')         // ← agregar
+          }}                                  // ← agregar
         />
       )
     case 'metas':

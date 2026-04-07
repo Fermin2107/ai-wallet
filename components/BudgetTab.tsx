@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { TrendingUp, AlertTriangle, DollarSign, Edit2, Check, X, Calendar } from 'lucide-react';
 import { useSimpleSupabase } from '../hooks/useSimpleSupabase';
 import { useSimpleAdaptedData } from '../hooks/useSimpleAdaptedData';
-import { CATEGORIA_EMOJI } from '../lib/types';
+import { CATEGORIA_EMOJI, formatCategoria } from '../lib/types';
 
 interface BudgetTabProps {
   selectedMonth?: string;
@@ -264,8 +264,8 @@ export default function BudgetTabFinal({ selectedMonth, refreshTrigger }: Budget
                 <div className="flex items-center space-x-3">
                   <div className="text-2xl">{categoryEmoji}</div>
                   <div>
-                    <h3 className="text-lg font-semibold text-white capitalize">
-                      {budget.category}
+                    <h3 className="text-lg font-semibold text-white">
+                      {formatCategoria(budget.category)}
                     </h3>
                     <div className="flex items-center space-x-2">
                       <span className="text-sm text-slate-400">

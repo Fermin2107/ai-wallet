@@ -176,3 +176,31 @@ export const agruparTransaccionesPorFecha = (transacciones: Transaction[]): Tran
     transacciones: transacciones.sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime())
   })).sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime());
 };
+
+// Mapa de normalización de categorías — usar en toda la UI
+export const CATEGORIA_DISPLAY: Record<string, string> = {
+  alimentacion:   'Alimentación',
+  transporte:     'Transporte',
+  salidas:        'Salidas',
+  servicios:      'Servicios',
+  salud:          'Salud',
+  educacion:      'Educación',
+  entretenimiento: 'Entretenimiento',
+  suscripciones:  'Suscripciones',
+  ropa:           'Ropa',
+  hobbies:        'Hobbies',
+  mascotas:       'Mascotas',
+  gym:            'Gym',
+  viajes:         'Viajes',
+  ahorro:         'Ahorro',
+  ingreso:        'Ingreso',
+  otros:          'Otros',
+}
+
+export function formatCategoria(cat: string): string {
+  if (!cat) return 'Otros'
+  const key = cat.toLowerCase().trim()
+  return CATEGORIA_DISPLAY[key] || 
+    // Capitalizar primera letra si no está en el mapa
+    cat.charAt(0).toUpperCase() + cat.slice(1).toLowerCase()
+}
