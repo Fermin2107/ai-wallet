@@ -17,8 +17,9 @@ export default function Home() {
   
   // 📅 Estado para el selector de meses
   const [selectedMonth, setSelectedMonth] = useState(() => {
-    // Iniciar con el mes actual en formato YYYY-MM
-    return new Date().toISOString().slice(0, 7);
+    // Iniciar con el mes actual en formato YYYY-MM usando hora local
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   });
   
   // 🎯 Estado para onboarding
