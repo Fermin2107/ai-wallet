@@ -5,6 +5,7 @@ import { TrendingUp, AlertTriangle, DollarSign, Edit2, Check, X, Calendar } from
 import { useSimpleSupabase } from '../hooks/useSimpleSupabase';
 import { useSimpleAdaptedData } from '../hooks/useSimpleAdaptedData';
 import { CATEGORIA_EMOJI, formatCategoria } from '../lib/types';
+import { supabase } from '../lib/supabase';
 
 interface BudgetTabProps {
   selectedMonth?: string;
@@ -112,12 +113,30 @@ export default function BudgetTabFinal({ selectedMonth, refreshTrigger }: Budget
   const { budgets, loading, error, refresh, updateBudget, createBudget, deleteBudget } = useSimpleSupabase();
   const { transactions } = useSimpleAdaptedData(selectedMonth);
   
+  // ← agregar estado para onboardingData
+  const [onboardingData, setOnboardingData] = useState({ 
+    ingreso_mensual: 0, 
+    objetivo_ahorro: 0 
+  });
+
   // ← agregar efecto para refresh trigger
   useEffect(() => {
     if (refreshTrigger && refreshTrigger > 0) {
       refresh();
     }
   }, [refreshTrigger]);
+
+  // ← agregar efecto para cargar onboardingData
+  useEffect(() => {
+    const load = async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      const userId = user?.id
+      if (!userId) return
+      const stored = localStorage.getItem(`ai_wallet_onboarding_${userId}`)
+      if (stored) setOnboardingData(JSON.parse(stored))
+    }
+    load()
+  }, []);
   
   // Debug temporal
   console.log('🔍 BudgetTabFinal - Estado:', { loading, error, budgetsCount: budgets?.length, transactionsCount: transactions?.length });
@@ -432,9 +451,6 @@ export default function BudgetTabFinal({ selectedMonth, refreshTrigger }: Budget
       {/* Estado vacío con sugerencias */}
       {budgets?.length === 0 && (
         (() => {
-          const onboardingData = JSON.parse(
-            localStorage.getItem('ai_wallet_onboarding') || '{}'
-          )
           const ingreso = onboardingData.ingreso_mensual || 0
           const objetivo = onboardingData.objetivo_ahorro || 0
           const disponible = ingreso - objetivo

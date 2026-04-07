@@ -25,6 +25,12 @@ export const getSupabaseClient = (): SupabaseClient => {
 
 export const supabase = getSupabaseClient()
 
+// Agregar esta función — permite destruir el singleton en logout
+export const resetSupabaseClient = (): void => {
+  browserClient = null
+  console.log('🔧 Supabase browser client reset')
+}
+
 // Cliente para el lado del servidor (API routes)
 export const createSupabaseServerClient = (): SupabaseClient => {
   return createClient(url, anonKey, {

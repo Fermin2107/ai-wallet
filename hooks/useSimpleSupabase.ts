@@ -135,6 +135,20 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
       try {
         setLoading(true);
         setError(null);
+
+        // ← CRÍTICO: verificar sesión activa antes de fetchear
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) {
+          // Sin usuario autenticado — limpiar y no fetchear
+          if (isMounted) {
+            setTransactions([]);
+            setBudgets([]);
+            setGoals([]);
+            setLoading(false);
+          }
+          return;
+        }
+
         const data = await fetchAllData(supabase);
         if (isMounted) applyData(data);
       } catch (err) {

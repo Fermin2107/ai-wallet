@@ -4,6 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { MessageCircle, Brain, Sparkles, TrendingUp, TrendingDown, Wallet, Lightbulb, Edit2, Trash2, X, Check, Calendar, Tag, HelpCircle, AlertTriangle, DollarSign } from 'lucide-react';
 import { Transaction, ChatMessage, agruparTransaccionesPorFecha } from '../lib/types';
 import { useSimpleAdaptedData } from '../hooks/useSimpleAdaptedData';
+import { supabase } from '../lib/supabase';
 
 const getEmojiCategoria = (categoria: string): string => {
   const mapa: Record<string, string> = {
@@ -60,10 +61,19 @@ export default function DashboardTab({ selectedMonth, onNavigateToChat, onNaviga
   
   // Cargar objetivoAhorro desde localStorage
   useEffect(() => {
-    const data = JSON.parse(
-      localStorage.getItem('ai_wallet_onboarding') || '{}'
-    )
-    setObjetivoAhorro(data.objetivo_ahorro || 0)
+    const loadOnboarding = async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      const userId = user?.id
+      if (!userId) return
+
+      // Leer con userId — nunca la key genérica
+      const stored = localStorage.getItem(`ai_wallet_onboarding_${userId}`)
+      if (stored) {
+        const data = JSON.parse(stored)
+        setObjetivoAhorro(data.objetivo_ahorro || 0)
+      }
+    }
+    loadOnboarding()
   }, [])
   
   // Usar datos adaptados simples de Supabase

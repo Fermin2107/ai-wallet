@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useSimpleSupabase } from '../hooks/useSimpleSupabase'
 import { createBrowserClient } from '@supabase/ssr'
+import { useWeeklySummary } from '../hooks/useWeeklySummary'
 
 interface ChatTabProps {
   selectedMonth: string
@@ -271,11 +272,13 @@ function autoRespond(msg: string, ctx: ReturnType<typeof buildFinancialContext>)
 }
 
 // ─── Chips dinámicos ─────────────────────────────────────────
-function getChips(ctx: ReturnType<typeof buildFinancialContext> | null): string[] {
+function getChips(
+  ctx: ReturnType<typeof buildFinancialContext> | null,
+  esLunes: boolean
+): string[] {
   if (!ctx || ctx.totalGastado === 0) {
     return ['¿Cómo voy este mes?', 'Registrar un gasto', 'Ver mis metas']
   }
-  // Al inicio del mes o si detecta poco historial
   if (new Date().getDate() <= 5 || ctx.totalGastado === 0) {
     return ['Cobré el sueldo 💰', 'Organizame el mes', 'Planificar próximos meses 📅', '¿Cuánto puedo gastar por día?']
   }
@@ -326,6 +329,40 @@ const [gastoInusualAlert, setGastoInusualAlert] = useState<{
   promedioHistorico: number
 } | null>(null)
 
+  const weeklySummary = useWeeklySummary()
+  const weeklySummaryInjected = useRef(false)
+
+  // ─── Resumen semanal automático ─────────────────────────────
+  useEffect(() => {
+    // Esperar a que haya datos reales cargados
+    if (!transactions || transactions.length === 0) return
+    // Solo una vez por sesión, aunque el efecto se re-ejecute
+    if (weeklySummaryInjected.current) return
+
+    const onboarding = JSON.parse(localStorage.getItem('ai_wallet_onboarding') || '{}')
+    const userId: string = onboarding?.userId || 'default'
+
+    if (!weeklySummary.shouldShow(userId)) return
+
+    const summaryData = weeklySummary.buildSummary(transactions, budgets, goals)
+    if (!summaryData) return
+
+    const mensaje = weeklySummary.formatSummaryMessage(summaryData)
+
+    // Insertar al inicio — no reemplaza el historial existente
+    setMessages(prev => [{
+      id: `weekly-${Date.now()}`,
+      text: mensaje,
+      sender: 'ai' as const,
+      timestamp: new Date(),
+      isAuto: true
+    }, ...prev])
+
+    weeklySummaryInjected.current = true
+    weeklySummary.markShown(userId)
+  }, [transactions, budgets, goals])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Construir contexto financiero cada vez que cambian los datos
@@ -345,69 +382,94 @@ const [gastoInusualAlert, setGastoInusualAlert] = useState<{
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Cargar historial guardado al montar
+  // Cargar historial guardado al montar — espera userId real de Supabase
   useEffect(() => {
-    const onboarding = JSON.parse(localStorage.getItem('ai_wallet_onboarding') || '{}')
-    const userId = onboarding?.userId || 'default'
-    
-    const savedMessages = localStorage.getItem(`ai_wallet_chat_${userId}`)
-    const savedHistory = localStorage.getItem(`ai_wallet_history_${userId}`)
-    
-    if (savedMessages) {
-      try {
-        const parsed = JSON.parse(savedMessages)
-        // Restaurar timestamps como objetos Date
-        const restored = parsed.map((m: any) => ({
-          ...m,
-          timestamp: new Date(m.timestamp)
-        }))
-        setMessages(restored)
-      } catch {}
+    const loadHistory = async () => {
+      // ← Obtener userId desde Supabase, no desde localStorage
+      const { data: { user } } = await supabase.auth.getUser()
+      const userId = user?.id || null
+
+      if (!userId) {
+        // Sin sesión — no cargar nada
+        setMessages([])
+        setConversationHistory([])
+        return
+      }
+
+      const savedMessages = localStorage.getItem(`ai_wallet_chat_${userId}`)
+      const savedHistory = localStorage.getItem(`ai_wallet_history_${userId}`)
+
+      if (savedMessages) {
+        try {
+          const parsed = JSON.parse(savedMessages)
+          const restored = parsed.map((m: Message) => ({
+            ...m,
+            timestamp: new Date(m.timestamp)
+          }))
+          setMessages(restored)
+        } catch { /* JSON corrupto — ignorar */ }
+      }
+
+      if (savedHistory) {
+        try {
+          setConversationHistory(JSON.parse(savedHistory))
+        } catch { /* JSON corrupto — ignorar */ }
+      }
     }
-    
-    if (savedHistory) {
-      try {
-        setConversationHistory(JSON.parse(savedHistory))
-      } catch {}
-    }
-  }, []) // Solo al montar
+
+    loadHistory()
+  }, [])
 
   // Guardar cada vez que cambian mensajes o historial
   useEffect(() => {
     if (messages.length === 0) return
-    
-    const onboarding = JSON.parse(localStorage.getItem('ai_wallet_onboarding') || '{}')
-    const userId = onboarding?.userId || 'default'
-    
-    try {
-      localStorage.setItem(`ai_wallet_chat_${userId}`, JSON.stringify(messages))
-      localStorage.setItem(`ai_wallet_history_${userId}`, JSON.stringify(conversationHistory))
-    } catch {}
+
+    const saveHistory = async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      const userId = user?.id
+      if (!userId) return
+
+      try {
+        localStorage.setItem(`ai_wallet_chat_${userId}`, JSON.stringify(messages))
+        localStorage.setItem(
+          `ai_wallet_history_${userId}`,
+          JSON.stringify(conversationHistory)
+        )
+      } catch { /* localStorage lleno — ignorar */ }
+    }
+
+    saveHistory()
   }, [messages, conversationHistory])
 
   // Contexto para el backend — con todos los números ya calculados
   const buildBackendContext = useCallback(() => {
     if (!ctx) return {}
-    const onboarding = JSON.parse(localStorage.getItem('ai_wallet_onboarding') || '{}')
 
-    // ── Análisis histórico por categoría (últimos 3 meses) ──
+    const rawKey = localStorage.getItem('ai_wallet_onboarding') || '{}'
+    const rawBase = JSON.parse(rawKey)
+    const userId: string = rawBase.userId || 'default'
+    const stored = localStorage.getItem(`ai_wallet_onboarding_${userId}`) || rawKey
+    const onboarding: {
+      ingreso_mensual?: number
+      objetivo_ahorro?: number
+      nombre?: string
+      medio_pago_habitual?: string
+    } = JSON.parse(stored)
+
     const hoy = new Date()
     const hace3Meses = new Date(hoy.getFullYear(), hoy.getMonth() - 3, 1)
-      .toISOString().split('T')[0].slice(0, 7) // "YYYY-MM"
+      .toISOString().split('T')[0].slice(0, 7)
 
-    // Transacciones de los últimos 3 meses excluyendo el mes actual
     const txHistorico = transactions.filter(t => {
       const mes = (t.transaction_date || '').slice(0, 7)
       return mes >= hace3Meses && mes < selectedMonth && t.type === 'gasto'
     })
 
-    // Meses únicos con datos reales
-    const mesesConDatos = Array.from(new Set(txHistorico.map(t => 
-      (t.transaction_date || '').slice(0, 7)
-    ))).filter(Boolean)
+    const mesesConDatos = Array.from(new Set(
+      txHistorico.map(t => (t.transaction_date || '').slice(0, 7))
+    )).filter(Boolean)
     const cantMeses = Math.max(1, mesesConDatos.length)
 
-    // Promedio mensual por categoría (histórico)
     const promedioPorCategoria: Record<string, number> = {}
     txHistorico.forEach(t => {
       const cat = t.category || 'otros'
@@ -417,22 +479,18 @@ const [gastoInusualAlert, setGastoInusualAlert] = useState<{
       promedioPorCategoria[cat] = Math.round(promedioPorCategoria[cat] / cantMeses)
     })
 
-    // Gasto mensual total histórico promedio
-    const gastoMensualPromedio = Object.values(promedioPorCategoria)
-      .reduce((s, v) => s + v, 0)
+    const gastoMensualPromedio = Object.values(promedioPorCategoria).reduce((s, v) => s + v, 0)
 
-    // Categorías esenciales conocidas
     const categoriasEsenciales = [
       'alimentacion', 'comida', 'supermercado', 'alquiler', 'servicios',
       'luz', 'gas', 'agua', 'internet', 'telefono', 'salud', 'medicina',
-      'farmacia', 'educacion', 'transporte', 'nafta', 'sube'
+      'farmacia', 'educacion', 'transporte', 'nafta', 'sube',
     ]
     const categoriasDiscrecionales = [
       'salidas', 'entretenimiento', 'ropa', 'caprichos', 'suscripciones',
-      'hobbies', 'viajes', 'restaurante', 'bar', 'delivery'
+      'hobbies', 'viajes', 'restaurante', 'bar', 'delivery',
     ]
 
-    // Clasificar categorías del usuario
     const categoriasClasificadas = Object.entries(promedioPorCategoria).map(([cat, promedio]) => {
       const esEsencial = categoriasEsenciales.some(e => cat.includes(e) || e.includes(cat))
       const esDiscrecional = categoriasDiscrecionales.some(d => cat.includes(d) || d.includes(cat))
@@ -440,22 +498,28 @@ const [gastoInusualAlert, setGastoInusualAlert] = useState<{
         categoria: cat,
         promedio_mensual: promedio,
         tipo: esEsencial ? 'esencial' : esDiscrecional ? 'discrecional' : 'variable',
-        // Cuánto gasta este mes vs promedio histórico
-        gasto_este_mes: ctx.budgetAnalysis.find(b => b.category === cat)?.spent || 
-          (transactions.filter(t => 
-            t.type === 'gasto' && 
-            t.category === cat && 
-            (t.transaction_date || '').startsWith(selectedMonth)
-          ).reduce((s, t) => s + Number(t.amount), 0))
+        gasto_este_mes:
+          ctx.budgetAnalysis.find(b => b.category === cat)?.spent ||
+          transactions
+            .filter(
+              t =>
+                t.type === 'gasto' &&
+                t.category === cat &&
+                (t.transaction_date || '').startsWith(selectedMonth)
+            )
+            .reduce((s, t) => s + Number(t.amount), 0),
       }
     })
 
-    // Gasto mínimo mensual estimado (solo esenciales)
     const gastoMinimoMensual = categoriasClasificadas
       .filter(c => c.tipo === 'esencial')
       .reduce((s, c) => s + c.promedio_mensual, 0)
 
     return {
+      // ── NUEVO ──
+      nombre_usuario: onboarding.nombre || null,
+      medio_pago_habitual: onboarding.medio_pago_habitual || null,
+
       resumen_financiero: ctx.resumen,
       fecha_hoy: new Date().toISOString().split('T')[0],
       mes_seleccionado: selectedMonth,
@@ -467,12 +531,12 @@ const [gastoInusualAlert, setGastoInusualAlert] = useState<{
       estado_mes: ctx.estado,
 
       budgets: ctx.budgetAnalysis.map(b => ({
-        categoria: b.category,    // nombre exacto para que la IA lo use al registrar
+        categoria: b.category,
         limite: b.limit,
         gastado: b.spent,
         disponible: b.remaining,
         estado: b.status,
-        porcentaje: b.percentUsed
+        porcentaje: b.percentUsed,
       })),
 
       goals: ctx.goalAnalysis.map(g => ({
@@ -481,18 +545,17 @@ const [gastoInusualAlert, setGastoInusualAlert] = useState<{
         actual: g.current,
         faltante: g.remaining,
         porcentaje: g.percentComplete,
-        meses_estimados: g.monthsToComplete
+        meses_estimados: g.monthsToComplete,
       })),
 
       alertas: ctx.alertas,
 
-      // ── NUEVO: contexto histórico para planificación ──
       historico: {
         meses_analizados: cantMeses,
         gasto_mensual_promedio: Math.round(gastoMensualPromedio),
         gasto_minimo_mensual: Math.round(gastoMinimoMensual),
         categorias: categoriasClasificadas,
-      }
+      },
     }
   }, [ctx, selectedMonth, transactions])
 
@@ -607,7 +670,8 @@ if (data.action === 'INSERT_TRANSACTION' && data.data?.type === 'gasto') {
     }
   }
 
-  const chips = getChips(ctx)
+  const esLunes = new Date().getDay() === 1
+  const chips = getChips(ctx, esLunes)
   const welcome = getWelcome(ctx)
 
   return (

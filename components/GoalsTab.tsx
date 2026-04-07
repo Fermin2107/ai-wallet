@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { Target, TrendingUp, Calendar, Award, Plus, Edit2, X, Check } from 'lucide-react';
 import { useSimpleSupabase } from '../hooks/useSimpleSupabase';
+import { supabase } from '../lib/supabase';
 
 interface GoalsTabProps {
   selectedMonth?: string;
@@ -12,12 +13,30 @@ interface GoalsTabProps {
 export default function GoalsTabSimple({ selectedMonth, refreshTrigger }: GoalsTabProps) {
   const { goals, loading, error, refresh, updateGoal, createGoal } = useSimpleSupabase();
   
+  // ← agregar estado para onboardingData
+  const [onboardingData, setOnboardingData] = useState({ 
+    ingreso_mensual: 0, 
+    objetivo_ahorro: 0 
+  });
+
   // ← agregar efecto para refresh trigger
   useEffect(() => {
     if (refreshTrigger && refreshTrigger > 0) {
       refresh();
     }
   }, [refreshTrigger]);
+
+  // ← agregar efecto para cargar onboardingData
+  useEffect(() => {
+    const load = async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      const userId = user?.id
+      if (!userId) return
+      const stored = localStorage.getItem(`ai_wallet_onboarding_${userId}`)
+      if (stored) setOnboardingData(JSON.parse(stored))
+    }
+    load()
+  }, []);
   
   // Debug temporal
   console.log('🔍 GoalsTab - Estado:', { loading, error, goalsCount: goals?.length });
@@ -46,9 +65,6 @@ export default function GoalsTabSimple({ selectedMonth, refreshTrigger }: GoalsT
   const puedeCrearMeta = metasActivas.length < 3
 
   // Cálculo para proyección dinámica
-  const onboardingData = JSON.parse(
-    localStorage.getItem('ai_wallet_onboarding') || '{}'
-  )
   const ingresoMensual = onboardingData.ingreso_mensual || 0
   const objetivoAhorro = onboardingData.objetivo_ahorro || 0
 

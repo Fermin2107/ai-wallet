@@ -27,30 +27,48 @@ const [onboardingDone, setOnboardingDone] = useState(false)
 const [checkingOnboarding, setCheckingOnboarding] = useState(true)
 
 useEffect(() => {
-    const checkOnboarding = async () => {
-      // Obtener el usuario actual
-      const { data: { session } } = await supabase.auth.getSession()
-      const userId = session?.user?.id
-      
-      if (!userId) {
-        // Sin usuario no mostramos onboarding ni dashboard
-        setCheckingOnboarding(false)
-        return
-      }
+  const checkOnboarding = async () => {
+    const { data: { session } } = await supabase.auth.getSession()
+    const userId = session?.user?.id
 
-      // Key única por usuario
-      const key = `ai_wallet_onboarding_${userId}` 
-      const data = localStorage.getItem(key)
-      const completed = data 
-        ? JSON.parse(data).onboarding_completed 
-        : false
-      
-      setOnboardingDone(completed)
+    if (!userId) {
       setCheckingOnboarding(false)
+      return
     }
 
-    checkOnboarding()
-  }, [])
+    // 1. Intentar leer desde Supabase (fuente de verdad)
+    const { data: profile } = await supabase
+      .from('user_profiles')
+      .select('onboarding_completed, nombre, ingreso_mensual, objetivo_ahorro, medio_pago_habitual, categorias')
+      .eq('user_id', userId)
+      .single()
+
+    if (profile?.onboarding_completed) {
+      // Sincronizar localStorage para que buildFinancialContext lo lea sin async
+      localStorage.setItem(`ai_wallet_onboarding_${userId}`, JSON.stringify({
+        onboarding_completed: true,
+        nombre: profile.nombre,
+        ingreso_mensual: profile.ingreso_mensual,
+        objetivo_ahorro: profile.objetivo_ahorro,
+        medio_pago_habitual: profile.medio_pago_habitual,
+        categorias: profile.categorias,
+        userId,
+      }))
+      setOnboardingDone(true)
+      setCheckingOnboarding(false)
+      return
+    }
+
+    // 2. Fallback: localStorage (usuarios existentes pre-migración)
+    const key = `ai_wallet_onboarding_${userId}` 
+    const stored = localStorage.getItem(key)
+    const completed = stored ? JSON.parse(stored).onboarding_completed : false
+    setOnboardingDone(completed)
+    setCheckingOnboarding(false)
+  }
+
+  checkOnboarding()
+}, [])
 
   const handleOnboardingComplete = () => {
     // Obtener userId para guardar con key correcta
@@ -85,9 +103,10 @@ useEffect(() => {
 
   // 📝 Función para formatear el mes para visualización
   const formatMonth = (monthString: string) => {
-    const date = new Date(monthString + '-01');
-    return date.toLocaleDateString('es-AR', { 
-      month: 'long', 
+    const [year, month] = monthString.split('-').map(Number);
+    const date = new Date(year, month - 1, 1); // constructor local, no UTC
+    return date.toLocaleDateString('es-AR', {
+      month: 'long',
       year: 'numeric'
     });
   };
