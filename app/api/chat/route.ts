@@ -40,6 +40,8 @@ ROL 1 — REGISTRAR GASTOS/INGRESOS:
 - Sin monto → preguntar solo "¿De cuánto fue?"
 - Fecha: usar siempre fecha_hoy salvo que el usuario diga otra
 - Categoria: usar exactamente los nombres de budgets[].categoria del contexto
+- Si ninguna categoría del contexto coincide con el gasto, usar "otros" como fallback — nunca inventar categorías nuevas
+- NUNCA registrar como categoría: "sin categoría", "sin_categoria", "uncategorized", "general", "varios" — siempre usar "otros" para esos casos
 
 GASTOS INUSUALES AL REGISTRAR:
 Si el contexto incluye historico.categorias y el gasto que estas registrando es
@@ -48,6 +50,13 @@ de forma natural y directa, sin alarmismo. Ejemplo:
 "Anotado los $50.000 en salidas ✅ Ojo: con esto ya gastaste casi la mitad de tu 
 presupuesto mensual normal para esa categoria ($X promedio/mes)."
 Solo mencionarlo una vez, al final del mensaje de confirmacion.
+
+REGLA DE CUENTAS:
+- Si en el contexto hay \`cuenta_default\`, usá ese id como \`account_id\` en INSERT_TRANSACTION.
+- Si el contexto trae \`resolved_account_id\`, SIEMPRE usá ese como \`account_id\`  ya fue resuelto en el frontend.
+- Si el usuario menciona explícitamente una cuenta, priorizá esa sobre el default.
+- Si no hay cuentas (\`tiene_cuentas\` = false), omitir \`account_id\`  es nullable.
+- Para CREATE_ACCOUNT: si \`cuenta_default\` es null, sugerí set_as_default: true en el mensaje de confirmación.
 
 ROL 2 — RESPONDER CONSULTAS CON NUMEROS REALES:
 Usar EXACTAMENTE los numeros del resumen_financiero. Nunca redondear mal ni inventar.
@@ -68,6 +77,14 @@ PASO 2 — Identificar donde hay margen real:
 PASO 3 — Respuesta concreta con numeros:
   Ejemplo: "En salidas gastas $X/mes en promedio, este mes ya llevas $Y. Recortando a $Z liberas $W por mes."
   Siempre terminar con el ahorro mensual total posible si aplica los recortes.
+
+REGLA ABSOLUTA SOBRE "OTROS":
+- La categoría "otros" existe para gastos sin clasificar. NUNCA la menciones como un logro, problema o insight principal.
+- NUNCA digas: "tu mayor gasto es Otros", "gastás mucho en Otros", "te recomiendo reducir Otros".
+- Si "otros" aparece entre las categorías con más gasto, simplemente ignorala en el análisis y pasá a la siguiente.
+- Si el usuario pregunta específicamente por "otros", podés mencionarla UNA sola vez con este framing:
+  "Tenés $X en gastos varios sin categorizar. Si querés, podemos organizarlos para entender mejor en qué se van."
+- En los análisis de optimización y distribución, "otros" nunca cuenta como categoría discrecional a recortar.
 
 ROL 4 — DISTRIBUCION DEL DINERO SOBRANTE:
 Cuando pregunten como organizar lo que sobra:
@@ -130,7 +147,8 @@ ALGORITMO DE PLANIFICACION:
 FORMATOS DE RESPUESTA — siempre JSON valido:
 
 Registrar gasto/ingreso:
-{"action":"INSERT_TRANSACTION","mensaje_respuesta":"confirmacion breve","data":{"description":"texto","amount":numero,"type":"gasto","category":"categoria","transaction_date":"YYYY-MM-DD","confirmed":true}}
+{"action":"INSERT_TRANSACTION","mensaje_respuesta":"confirmacion breve","data":{"description":"texto","amount":numero,"type":"gasto","category":"categoria","transaction_date":"YYYY-MM-DD","confirmed":true,"installment_count":1,"first_due_month":"YYYY-MM"}}
+Para compras en cuotas con tarjeta de crédito, poner installment_count = N y first_due_month = próximo mes de vencimiento. Para pagos únicos, installment_count = 1.
 
 Responder consulta / analisis / optimizacion:
 {"action":"RESPUESTA_CONSULTA","mensaje_respuesta":"respuesta con numeros reales","data":null}
@@ -140,6 +158,9 @@ Crear meta:
 
 Crear presupuesto:
 {"action":"CREATE_BUDGET","mensaje_respuesta":"confirmacion","data":{"category":"nombre","limit_amount":numero,"month_period":"YYYY-MM"}}
+
+Crear cuenta:
+{"action":"CREATE_ACCOUNT","mensaje_respuesta":"confirmacion","data":{"name":"nombre","type":"liquid","balance":numero,"credit_limit":numero,"closing_day":numero,"due_day":numero,"set_as_default":boolean}}
 
 Plan multi-mes:
 {"action":"PLAN_MENSUAL","mensaje_respuesta":"Plan del mes:\\nAhorro: $X\\n[Categoria]: $X\\nLibre: $X\\n\\nEn X meses acumulas $Y de ahorro.","data":{"ingreso_detectado":numero,"meses":numero,"distribucion":{"ahorro":numero,"categorias":{"nombre":numero},"libre":numero}}
@@ -206,7 +227,8 @@ async function saveTransactionsToSupabase(
   userId: string | null,
   budgetsData?: any[],
   goalsData?: any[],
-  userToken?: string | null  // ← AGREGAR
+  userToken?: string | null,  
+  context?: any  
 ): Promise<void> {
   console.log('💾 === GUARDANDO TRANSACCIONES EN SUPABASE ===');
   
@@ -258,18 +280,24 @@ async function saveTransactionsToSupabase(
         ai_confidence: 0.95,
         user_id: userId || undefined,
         budget_id: budgetMatch?.id || null,
-        goal_id: goalMatch?.id || null
+        goal_id: goalMatch?.id || null,
+        account_id: tx.account_id
+          ?? context?.server_resolved_account_id  // resuelto server-side
+          ?? context?.resolved_account_id         // resuelto en el frontend
+          ?? null,
+        installment_count: tx.installment_count ?? 1,
+        first_due_month:   tx.first_due_month   ?? null,
       };
     });
 
     console.log('📝 Transacción a insertar:', JSON.stringify(transactionsToInsert[0], null, 2));
 
     console.log('📝 Transacciones a insertar:', transactionsToInsert.length);
-    
+
     // Insertar todas las transacciones en una sola operación
     const { data, error, count } = await supabase
       .from('transactions')
-      .insert(transactionsToInsert)
+      .insert(transactionsToInsert.map(({ installment_count: _ic, first_due_month: _fd, ...rest }: any) => rest))
       .select();
 
     if (error) {
@@ -279,7 +307,41 @@ async function saveTransactionsToSupabase(
 
     console.log('✅ Transacciones guardadas exitosamente en Supabase:');
     console.log(`📊 Registros insertados: ${count || transactionsToInsert.length}`);
-    console.log('📋 IDs generados:', data?.map(t => t.id));
+    console.log('📋 IDs generados:', data?.map((t: any) => t.id));
+
+    // Generate installments for credit-account transactions
+    if (data && data.length > 0 && userId) {
+      for (let idx = 0; idx < data.length; idx++) {
+        const saved   = data[idx];
+        const txExtra = transactionsToInsert[idx];
+        const accId   = saved.account_id;
+        if (!accId) continue;
+
+        // Check if the account is a credit account
+        const { data: accData } = await supabase
+          .from('accounts')
+          .select('type')
+          .eq('id', accId)
+          .single();
+
+        if (accData?.type !== 'credit') continue;
+
+        const installCount  = (txExtra as any).installment_count ?? 1;
+        const firstDueMonth = (txExtra as any).first_due_month
+          ?? new Date().toISOString().slice(0, 7);
+
+        await generateInstallments(
+          saved.id,
+          accId,
+          userId,
+          saved.amount,
+          installCount,
+          firstDueMonth,
+          supabase
+        );
+        console.log(`✅ ${installCount} cuota(s) generada(s) para tx ${saved.id}`);
+      }
+    }
     
   } catch (error) {
     console.error('💥 Error crítico guardando en Supabase:', error);
@@ -523,6 +585,50 @@ async function createGoalInSupabase(
   }
 }
 
+// Función para crear una cuenta en Supabase
+async function createAccountInSupabase(
+  data: {
+    name: string;
+    type: 'liquid' | 'credit' | 'savings';
+    balance: number;
+    credit_limit?: number;
+    closing_day?: number;
+    due_day?: number;
+    set_as_default?: boolean;
+  },
+  supabaseClient: any,
+  userId: string
+) {
+  // Si set_as_default, quitar default anterior primero
+  if (data.set_as_default) {
+    await supabaseClient
+      .from('accounts')
+      .update({ is_default: false })
+      .eq('user_id', userId)
+      .eq('is_default', true);
+  }
+
+  const { data: account, error } = await supabaseClient
+    .from('accounts')
+    .insert({
+      user_id: userId,
+      name: data.name,
+      type: data.type,
+      balance: data.balance,
+      credit_limit: data.credit_limit ?? null,
+      closing_day: data.closing_day ?? null,
+      due_day: data.due_day ?? null,
+      is_default: data.set_as_default ?? false,
+      is_active: true,
+      currency: 'ARS',
+    })
+    .select()
+    .single();
+
+  if (error) throw error;
+  return account;
+}
+
 // Función para crear un presupuesto en Supabase
 async function createBudgetInSupabase(
   budgetData: any,
@@ -575,10 +681,13 @@ async function updateGoalProgressInSupabase(
     : createSupabaseServerClient();
   
   try {
+    if (!userId) throw new Error('userId requerido para buscar metas');
+
     // Primero buscar la meta por nombre (búsqueda parcial)
     const { data: existingGoals, error: searchError } = await supabase
       .from('goals')
       .select('*')
+      .eq('user_id', userId)
       .ilike('name', `%${goalName}%`)
       .eq('is_active', true);
 
@@ -603,6 +712,7 @@ async function updateGoalProgressInSupabase(
       const { data: newGoal, error: createError } = await supabase
         .from('goals')
         .insert({
+          user_id: userId,
           name: goalNameWithEmoji,
           target_amount: targetAmount,
           current_amount: amount,
@@ -653,42 +763,57 @@ async function updateGoalProgressInSupabase(
 }
 
 // Función para manejar consultas
-async function handleQuery(queryType: string, filters?: any): Promise<any> {
+async function handleQuery(
+  queryType: string,
+  filters?: any,
+  userId?: string | null,
+  userToken?: string | null
+): Promise<any> {
   console.log('🔍 === MANEJANDO CONSULTA ===');
-  
-  const supabase = createSupabaseServerClient();
-  
+
+  if (!userId) throw new Error('userId requerido para consultas');
+
+  const supabase = userToken
+    ? createSupabaseServerClientWithToken(userToken)
+    : createSupabaseServerClient();
+
   try {
     switch (queryType) {
-      case 'budget_status':
+      case 'budget_status': {
         const category = filters?.category;
         if (!category) throw new Error('Se requiere categoría para consulta de presupuesto');
-        
+
         const { data: budget } = await supabase
           .from('budget_summary')
           .select('*')
+          .eq('user_id', userId)
           .eq('category', category)
           .single();
-          
-        return budget;
 
-      case 'goals_summary':
+        return budget;
+      }
+
+      case 'goals_summary': {
         const { data: goals } = await supabase
           .from('goals_summary')
           .select('*')
+          .eq('user_id', userId)
           .order('progress_percentage', { ascending: false });
-          
-        return goals;
 
-      case 'monthly_spending':
+        return goals;
+      }
+
+      case 'monthly_spending': {
         const { data: spending } = await supabase
           .from('monthly_summary')
           .select('*')
+          .eq('user_id', userId)
           .eq('type', 'gasto')
           .order('total_amount', { ascending: false })
           .limit(5);
-          
+
         return spending;
+      }
 
       default:
         throw new Error(`Tipo de consulta no soportado: ${queryType}`);
@@ -699,15 +824,100 @@ async function handleQuery(queryType: string, filters?: any): Promise<any> {
   }
 }
 
+// ─── Account resolution (Priority: explicit mention → context → default → single liquid → error) ───
+async function resolveAccount(
+  userId: string,
+  message: string,
+  context: any,
+  supabaseClient: any
+): Promise<{ account_id: string | null; error: string | null }> {
+  const { data: accounts, error } = await supabaseClient
+    .from('accounts')
+    .select('id, name, type, is_default')
+    .eq('user_id', userId)
+    .eq('is_active', true);
+
+  if (error || !accounts || accounts.length === 0) {
+    return { account_id: null, error: null }; // No accounts yet — account_id is nullable
+  }
+
+  // 1. Explicit mention in message
+  const msgLower = message.toLowerCase();
+  for (const acc of accounts) {
+    if (msgLower.includes(acc.name.toLowerCase())) {
+      return { account_id: acc.id, error: null };
+    }
+  }
+
+  // 2. Already resolved by frontend
+  if (context?.resolved_account_id) {
+    return { account_id: context.resolved_account_id, error: null };
+  }
+
+  // 3. User's default account
+  const defaultAcc = accounts.find((a: any) => a.is_default);
+  if (defaultAcc) {
+    return { account_id: defaultAcc.id, error: null };
+  }
+
+  // 4. Fallback: single liquid account
+  const liquidAccounts = accounts.filter((a: any) => a.type === 'liquid');
+  if (liquidAccounts.length === 1) {
+    return { account_id: liquidAccounts[0].id, error: null };
+  }
+
+  // 5. Ambiguous — require clarification
+  const names = accounts.map((a: any) => `"${a.name}"`).join(', ');
+  return {
+    account_id: null,
+    error: `Tenés varias cuentas (${names}). ¿En cuál querés registrar esto?`
+  };
+}
+
+// ─── Generate installment records for a credit transaction ───
+async function generateInstallments(
+  transactionId: string,
+  accountId: string,
+  userId: string,
+  totalAmount: number,
+  installmentCount: number,
+  firstDueMonth: string,   // YYYY-MM
+  supabaseClient: any
+): Promise<void> {
+  const [yearStr, monthStr] = firstDueMonth.split('-');
+  const baseYear = parseInt(yearStr, 10);
+  const baseMonth = parseInt(monthStr, 10) - 1; // 0-indexed
+
+  const installmentAmount = Math.round((totalAmount / installmentCount) * 100) / 100;
+
+  const records = Array.from({ length: installmentCount }, (_, i) => {
+    const d = new Date(baseYear, baseMonth + i, 1);
+    const due_month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    return {
+      transaction_id: transactionId,
+      account_id: accountId,
+      user_id: userId,
+      installment_number: i + 1,
+      total_installments: installmentCount,
+      due_month,
+      amount: installmentAmount,
+      is_paid: false,
+    };
+  });
+
+  const { error } = await supabaseClient.from('installments').insert(records);
+  if (error) throw error;
+}
+
 // Función principal para ejecutar acciones
-async function executeAction(action: string, data: any, originalMessage: string, userId: string | null, budgetsData?: any[], goalsData?: any[], userToken?: string | null): Promise<any> {
+async function executeAction(action: string, data: any, originalMessage: string, userId: string | null, budgetsData?: any[], goalsData?: any[], userToken?: string | null, context?: any): Promise<any> {
   console.log(`🚀 === EJECUTANDO ACCIÓN: ${action} ===`);
   
   switch (action) {
     case 'INSERT_TRANSACTION':
       // Pasar directamente el data de Groq (compatible con ambos formatos)
       const transactions = [data];
-      await saveTransactionsToSupabase(transactions, originalMessage, userId, budgetsData, goalsData, userToken);
+      await saveTransactionsToSupabase(transactions, originalMessage, userId, budgetsData, goalsData, userToken, context);
       return { success: true, message: 'Transacción guardada' };
 
     case 'CREATE_GOAL':
@@ -717,6 +927,28 @@ async function executeAction(action: string, data: any, originalMessage: string,
     case 'CREATE_BUDGET':
       await createBudgetInSupabase(data, userId, userToken);
       return { success: true, message: 'Presupuesto creado' };
+
+    case 'CREATE_ACCOUNT': {
+      if (!userId) throw new Error('userId requerido para crear cuenta');
+      const { createClient } = await import('@supabase/supabase-js');
+      const supabase = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        {
+          global: {
+            headers: { Authorization: `Bearer ${userToken}` }
+          },
+          auth: { persistSession: false, autoRefreshToken: false }
+        }
+      );
+      const account = await createAccountInSupabase(data, supabase, userId);
+      return {
+        success: true,
+        mensaje_respuesta: 'Cuenta creada exitosamente',
+        action: 'CREATE_ACCOUNT',
+        data: account,
+      };
+    }
 
     case 'UPDATE_GOAL_PROGRESS':
       await updateGoalProgressInSupabase(
@@ -731,7 +963,12 @@ async function executeAction(action: string, data: any, originalMessage: string,
     case 'QUERY_BUDGET':
     case 'QUERY_GOALS':
     case 'QUERY_TRANSACTIONS':
-      const result = await handleQuery(data.query_type, data.filters);
+      const result = await handleQuery(
+        data.query_type,
+        data.filters,
+        userId,
+        userToken
+      );
       return { success: true, data: result };
 
     case 'RESPUESTA_CONSULTA':
@@ -803,40 +1040,76 @@ export async function POST(request: NextRequest) {
     // Justo después de intentar obtener el user:
     console.log('👤 User obtenido:', userId || 'NULL - no se pudo obtener');
 
-    // Obtener budgets y goals del usuario para linkear con transacciones
+    // Obtener budgets, goals y cuentas del usuario
     let budgetsData: any[] = []
     let goalsData: any[] = []
+    let accountsData: any[] = []
+    let unpaidInstallmentsTotal = 0
     if (userId) {
       try {
-        const { data: budgetsResult, error: budgetsError } = await supabaseServer
-          .from('budgets')
-          .select('id, category')
-          .or(`user_id.eq.${userId},user_id.is.null`)
-        
-        console.log('💰 budgets fetch error:', budgetsError?.message || 'ninguno')
-        budgetsData = budgetsResult || []
-        console.log('💰 budgetsData count:', budgetsData.length)
-        console.log('💰 budgetsData:', JSON.stringify(budgetsData))
+        const [budgetsResult, goalsResult, accountsResult, installmentsResult] = await Promise.all([
+          supabaseServer
+            .from('budgets')
+            .select('id, category')
+            .eq('user_id', userId),
+          supabaseServer
+            .from('goals')
+            .select('id, name, is_active, is_completed')
+            .eq('user_id', userId)
+            .eq('is_active', true),
+          supabaseServer
+            .from('accounts')
+            .select('id, name, type, balance, credit_limit, is_default')
+            .eq('user_id', userId)
+            .eq('is_active', true),
+          supabaseServer
+            .from('installments')
+            .select('amount')
+            .eq('user_id', userId)
+            .eq('is_paid', false),
+        ])
 
-        const { data: goalsResult, error: goalsError } = await supabaseServer
-          .from('goals')
-          .select('id, name, is_active, is_completed')
-          .eq('is_active', true)
-        
-        console.log('🎯 goals fetch error:', goalsError?.message || 'ninguno')
-        goalsData = goalsResult || []
-        console.log('🎯 goalsData count:', goalsData.length)
+        budgetsData = budgetsResult.data || []
+        goalsData   = goalsResult.data   || []
+        accountsData = accountsResult.data || []
+        unpaidInstallmentsTotal = (installmentsResult.data || [])
+          .reduce((s: number, i: any) => s + Number(i.amount), 0)
+
+        console.log('💰 budgets:', budgetsData.length, '| 🏦 accounts:', accountsData.length)
       } catch (error) {
-        console.error('❌ Error fetching budgets/goals:', error)
+        console.error('❌ Error fetching budgets/goals/accounts:', error)
       }
     } else {
-      console.log('❌ No userId - no se pueden fetchear budgets')
+      console.log('❌ No userId - no se pueden fetchear datos')
     }
 
-    console.log('📥 Request recibido:', { 
-      message, 
+    // ─── Resolve account server-side ───
+    let serverResolvedAccountId: string | null = null;
+    if (userId) {
+      const { account_id, error: accError } = await resolveAccount(
+        userId, message, context, supabaseServer
+      );
+      if (accError) {
+        // Ambiguous — return picker data so the frontend can show account chips
+        const { data: accsForPicker } = await supabaseServer
+          .from('accounts')
+          .select('id, name, type')
+          .eq('user_id', userId)
+          .eq('is_active', true);
+        return NextResponse.json({
+          action: 'NEEDS_ACCOUNT_SELECTION',
+          mensaje_respuesta: accError,
+          data: { accounts: accsForPicker || [], pending_message: message },
+        });
+      }
+      serverResolvedAccountId = account_id;
+    }
+
+    console.log('📥 Request recibido:', {
+      message,
       hasContext: !!context,
       userId: userId || 'anonymous',
+      serverResolvedAccountId,
       ingreso_mensual: context?.ingreso_mensual,
       objetivo_ahorro: context?.objetivo_ahorro,
       dinero_disponible: context?.dinero_disponible,
@@ -878,6 +1151,26 @@ DATOS DE METAS:
 ${context?.goals?.map((g: any) =>
   `- ${g.nombre}: $${g.actual?.toLocaleString('es-AR')} de $${g.objetivo?.toLocaleString('es-AR')} (falta $${g.faltante?.toLocaleString('es-AR')})${g.meses_estimados ? ` — ~${g.meses_estimados} meses` : ''}` 
 ).join('\n') ?? 'Sin metas'}
+
+CUENTAS DEL USUARIO:
+${accountsData.length === 0
+  ? 'Sin cuentas registradas — omitir account_id en transacciones.'
+  : accountsData.map((a: any) => {
+      const tag = a.is_default ? ' ← DEFAULT' : ''
+      const extra = a.type === 'credit' ? ` (límite $${Number(a.credit_limit || 0).toLocaleString('es-AR')})` : ''
+      return `- "${a.name}" | tipo: ${a.type} | saldo: $${Number(a.balance).toLocaleString('es-AR')}${extra} | id: ${a.id}${tag}`
+    }).join('\n')
+}
+CUENTA RESUELTA PARA ESTA TRANSACCIÓN: ${
+  serverResolvedAccountId
+    ? `id ${serverResolvedAccountId} — usá este valor exacto como account_id`
+    : 'ninguna (account_id = null)'
+}
+DISPONIBLE REAL: $${(
+  accountsData
+    .filter((a: any) => a.type === 'liquid' || a.type === 'savings')
+    .reduce((s: number, a: any) => s + Number(a.balance), 0) - unpaidInstallmentsTotal
+).toLocaleString('es-AR')} (efectivo − deuda cuotas impagas $${unpaidInstallmentsTotal.toLocaleString('es-AR')})
 
 ALERTAS ACTIVAS:
 ${context?.alertas?.map((a: string) => `- ${a}`).join('\n') ?? 'Sin alertas'}
@@ -962,7 +1255,8 @@ Si no respetas este formato, la app explota. Empeza tu respuesta con { y termin�
       try {
         console.log('🔄 Iniciando ejecución de acción:', aiResponse.action);
         console.log('📦 aiResponse.data:', JSON.stringify(aiResponse.data, null, 2));
-        const actionResult = await executeAction(aiResponse.action, aiResponse.data, message, userId, budgetsData, goalsData, authHeader?.replace('Bearer ', '') || null);
+        const enrichedContext = { ...context, server_resolved_account_id: serverResolvedAccountId };
+        const actionResult = await executeAction(aiResponse.action, aiResponse.data, message, userId, budgetsData, goalsData, authHeader?.replace('Bearer ', '') || null, enrichedContext);
         console.log('✅ Acción ejecutada exitosamente:', actionResult);
         
         // Agregar información sobre la ejecución SOLO si fue exitosa

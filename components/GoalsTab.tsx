@@ -572,7 +572,7 @@ export default function GoalsTabSimple({ selectedMonth, refreshTrigger }: GoalsT
             <button
               onClick={async () => {
                 if (!showEditModal) return
-                await updateGoal(showEditModal, { is_completed: true })
+                await supabase.from('goals').update({ is_active: false }).eq('id', showEditModal)
                 setShowEditModal(null)
                 refresh()
               }}

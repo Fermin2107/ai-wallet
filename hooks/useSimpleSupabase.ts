@@ -17,6 +17,7 @@ export interface SimpleTransaction {
   created_at: string;
   confirmed: boolean;
   source: 'voice' | 'text' | 'manual';
+  account_id?: string | null;
 }
 
 export interface SimpleBudget {
@@ -38,10 +39,41 @@ export interface SimpleGoal {
   is_completed: boolean;
 }
 
+export interface SimpleAccount {
+  id: string;
+  name: string;
+  type: 'liquid' | 'credit' | 'savings';
+  balance: number;
+  credit_limit?: number | null;
+  is_default: boolean;
+  currency: string;
+}
+
+export interface SimpleInstallment {
+  id: string;
+  transaction_id: string;
+  account_id: string;
+  due_month: string;
+  amount: number;
+  is_paid: boolean;
+}
+
+export interface CreateAccountInput {
+  name: string;
+  type: 'liquid' | 'credit' | 'savings';
+  balance: number;
+  credit_limit?: number;
+  closing_day?: number;
+  due_day?: number;
+  is_default?: boolean;
+}
+
 export interface UseSimpleSupabaseReturn {
   transactions: SimpleTransaction[];
   budgets: SimpleBudget[];
   goals: SimpleGoal[];
+  accounts: SimpleAccount[];
+  installments: SimpleInstallment[];
   loading: boolean;
   error: string | null;
   refresh: (selectedMonth?: string) => Promise<void>;
@@ -50,13 +82,15 @@ export interface UseSimpleSupabaseReturn {
   updateBudget: (id: string, limitAmount: number) => Promise<boolean>;
   createBudget: (category: string, limitAmount: number, monthPeriod?: string) => Promise<boolean>;
   deleteBudget: (id: string) => Promise<boolean>;
+  setDefaultAccount: (id: string) => Promise<boolean>;
+  createAccount: (data: CreateAccountInput) => Promise<SimpleAccount | null>;
 }
 
 // ✅ Helper: siempre obtiene el userId fresco, nunca desde estado
 async function getFreshUserId(supabase: ReturnType<typeof getSupabaseClient>): Promise<string | null> {
   try {
     // getUser() hace una llamada al servidor — nunca devuelve null si estás logueado
-    const { data: { user }, error } = await supabase.auth.getUser();
+    const { data: { user } } = await supabase.auth.getUser();
     const userId = user?.id || null;
     console.log('🔑 getFreshUserId:', userId || 'NULL');
     return userId;
@@ -68,20 +102,27 @@ async function getFreshUserId(supabase: ReturnType<typeof getSupabaseClient>): P
 
 // ✅ Helper: refresca todos los datos y actualiza estado
 async function fetchAllData(supabase: ReturnType<typeof getSupabaseClient>) {
-  const [transactionsRes, budgetsRes, goalsRes] = await Promise.all([
+  const [transactionsRes, budgetsRes, goalsRes, accountsRes, installmentsRes] = await Promise.all([
     supabase.from('transactions').select('*').order('created_at', { ascending: false }),
     supabase.from('budgets').select('*').order('category'),
-    supabase.from('goals').select('*').order('target_date', { ascending: true })
+    supabase.from('goals').select('*').eq('is_active', true).order('target_date', { ascending: true }),
+    supabase.from('accounts').select('id, name, type, balance, credit_limit, is_default, currency').eq('is_active', true),
+    supabase.from('installments').select('id, transaction_id, account_id, due_month, amount, is_paid').eq('is_paid', false)
   ]);
 
   if (transactionsRes.error) throw new Error(`Transacciones: ${transactionsRes.error.message}`);
   if (budgetsRes.error) throw new Error(`Presupuestos: ${budgetsRes.error.message}`);
   if (goalsRes.error) throw new Error(`Metas: ${goalsRes.error.message}`);
+  // accounts/installments: tolerate missing table during migration
+  const accounts = accountsRes.error ? [] : (accountsRes.data || []);
+  const installments = installmentsRes.error ? [] : (installmentsRes.data || []);
 
   return {
     transactions: transactionsRes.data || [],
     budgets: budgetsRes.data || [],
-    goals: goalsRes.data || []
+    goals: goalsRes.data || [],
+    accounts,
+    installments,
   };
 }
 
@@ -89,6 +130,8 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
   const [transactions, setTransactions] = useState<SimpleTransaction[]>([]);
   const [budgets, setBudgets] = useState<SimpleBudget[]>([]);
   const [goals, setGoals] = useState<SimpleGoal[]>([]);
+  const [accounts, setAccounts] = useState<SimpleAccount[]>([]);
+  const [installments, setInstallments] = useState<SimpleInstallment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -100,10 +143,12 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
   const supabase = supabaseRef.current;
 
   // ✅ Helper interno para actualizar estado desde resultado
-  const applyData = useCallback((data: { transactions: any[], budgets: any[], goals: any[] }) => {
+  const applyData = useCallback((data: { transactions: any[], budgets: any[], goals: any[], accounts: any[], installments: any[] }) => {
     setTransactions(data.transactions);
     setBudgets(data.budgets);
     setGoals(data.goals);
+    setAccounts(data.accounts);
+    setInstallments(data.installments);
     setError(null);
   }, []);
 
@@ -231,14 +276,21 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
 
   const updateGoal = useCallback(async (id: string, data: Partial<SimpleGoal>): Promise<boolean> => {
     try {
+      // Build is_completed: explicit value wins; otherwise derive from amounts if provided
+      const is_completed =
+        data.is_completed !== undefined
+          ? data.is_completed
+          : data.current_amount !== undefined
+            ? data.current_amount >= (data.target_amount ?? 0)
+            : undefined;
+
+      const payload: any = { ...data };
+      if (is_completed !== undefined) payload.is_completed = is_completed;
+      else delete payload.is_completed;
+
       const { error } = await supabase
         .from('goals')
-        .update({
-          ...data,
-          is_completed: data.current_amount !== undefined
-            ? data.current_amount >= (data.target_amount || 0)
-            : undefined
-        })
+        .update(payload)
         .eq('id', id);
 
       if (error) {
@@ -343,10 +395,84 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
     }
   }, [applyData]);
 
+  // ─── ACCOUNTS ────────────────────────────────────────────
+
+  const createAccount = useCallback(async (data: CreateAccountInput): Promise<SimpleAccount | null> => {
+    try {
+      const userId = await getFreshUserId(supabase);
+      if (!userId) { setError('Usuario no autenticado'); return null; }
+
+      // Clear existing default first if this one should become default
+      if (data.is_default) {
+        await supabase
+          .from('accounts')
+          .update({ is_default: false })
+          .eq('user_id', userId)
+          .eq('is_default', true);
+      }
+
+      const { data: account, error } = await supabase
+        .from('accounts')
+        .insert({
+          user_id: userId,
+          name: data.name,
+          type: data.type,
+          balance: data.balance,
+          credit_limit: data.credit_limit ?? null,
+          closing_day:  data.closing_day  ?? null,
+          due_day:      data.due_day      ?? null,
+          is_default: data.is_default ?? false,
+          is_active: true,
+          currency: 'ARS',
+        })
+        .select()
+        .single();
+
+      if (error) { setError(error.message); return null; }
+
+      const freshData = await fetchAllData(supabase);
+      applyData(freshData);
+      return account as SimpleAccount;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error desconocido');
+      return null;
+    }
+  }, [applyData]);
+
+  const setDefaultAccount = useCallback(async (id: string): Promise<boolean> => {
+    try {
+      const userId = await getFreshUserId(supabase);
+      if (!userId) { setError('Usuario no autenticado'); return false; }
+
+      // Remove current default, then set new one (two steps to avoid unique constraint conflict)
+      const { error: clearErr } = await supabase
+        .from('accounts')
+        .update({ is_default: false })
+        .eq('user_id', userId)
+        .eq('is_default', true);
+      if (clearErr) { setError(clearErr.message); return false; }
+
+      const { error: setErr } = await supabase
+        .from('accounts')
+        .update({ is_default: true })
+        .eq('id', id);
+      if (setErr) { setError(setErr.message); return false; }
+
+      const freshData = await fetchAllData(supabase);
+      applyData(freshData);
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error desconocido');
+      return false;
+    }
+  }, [applyData]);
+
   return {
     transactions: transactions || [],
     budgets: budgets || [],
     goals: goals || [],
+    accounts: accounts || [],
+    installments: installments || [],
     loading,
     error,
     refresh,
@@ -354,6 +480,8 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
     createGoal,
     updateBudget,
     createBudget,
-    deleteBudget
+    deleteBudget,
+    setDefaultAccount,
+    createAccount,
   };
 }

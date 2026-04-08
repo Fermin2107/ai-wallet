@@ -14,6 +14,19 @@ export interface RawTransaction {
   description: string
 }
 
+export interface RawAccount {
+  id: string
+  type: 'liquid' | 'credit' | 'savings'
+  balance: number
+  is_default: boolean
+}
+
+export interface RawInstallment {
+  account_id: string
+  amount: number
+  is_paid: boolean
+}
+
 export interface RawBudget {
   id: string
   category: string
@@ -77,6 +90,11 @@ export interface FinancialContext {
   estado: 'bien' | 'cuidado' | 'mal'
   score: number                    // 0-100
 
+  // — Cuentas —
+  liquidTotal: number              // suma de saldos de cuentas liquid/savings
+  creditDebt: number               // suma de cuotas impagas en tarjetas de crédito
+  realAvailable: number            // liquidTotal - creditDebt
+
   // — Plata disponible —
   ingresoMensual: number
   totalIngresado: number           // ingresos reales registrados este mes
@@ -117,8 +135,21 @@ export function buildFinancialContext(
   budgets: RawBudget[],
   goals: RawGoal[],
   onboarding: OnboardingData,
-  selectedMonth: string            // YYYY-MM
+  selectedMonth: string,           // YYYY-MM
+  accounts: RawAccount[] = [],
+  installments: RawInstallment[] = []
 ): FinancialContext {
+
+  // — Account calculations —
+  const liquidTotal = accounts
+    .filter(a => a.type === 'liquid' || a.type === 'savings')
+    .reduce((s, a) => s + a.balance, 0)
+
+  const creditDebt = installments
+    .filter(i => !i.is_paid)
+    .reduce((s, i) => s + i.amount, 0)
+
+  const realAvailable = liquidTotal - creditDebt
 
   const hoy = new Date()
   const diaDelMes = hoy.getDate()
@@ -349,6 +380,9 @@ export function buildFinancialContext(
   return {
     estado,
     score,
+    liquidTotal,
+    creditDebt,
+    realAvailable,
     ingresoMensual,
     totalIngresado,
     totalGastado,

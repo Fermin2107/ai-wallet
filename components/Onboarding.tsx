@@ -18,14 +18,14 @@ interface OnboardingData {
 }
 
 const CATEGORIAS = [
-  { id: 'alimentacion',   emoji: '🍔', label: 'Comida y delivery' },
-  { id: 'supermercado',   emoji: '🛒', label: 'Supermercado' },
-  { id: 'transporte',     emoji: '🚌', label: 'Transporte y nafta' },
-  { id: 'salidas',        emoji: '🎉', label: 'Salidas' },
-  { id: 'servicios',      emoji: '💡', label: 'Servicios básicos' },
-  { id: 'suscripciones',  emoji: '📱', label: 'Suscripciones' },
-  { id: 'salud',          emoji: '🏥', label: 'Salud' },
-  { id: 'otros',          emoji: '📦', label: 'Otros' },
+  { id: 'alimentacion',  emoji: '🍔', label: 'Comida y delivery' },
+  { id: 'supermercado',  emoji: '🛒', label: 'Supermercado' },
+  { id: 'transporte',    emoji: '🚌', label: 'Transporte y nafta' },
+  { id: 'salidas',       emoji: '🎉', label: 'Salidas' },
+  { id: 'servicios',     emoji: '💡', label: 'Servicios básicos' },
+  { id: 'suscripciones', emoji: '📱', label: 'Suscripciones' },
+  { id: 'salud',         emoji: '🏥', label: 'Salud' },
+  // 'otros' NO aparece en la selección — se agrega siempre por código
 ]
 
 const MEDIOS_PAGO = [
@@ -55,32 +55,91 @@ const MEDIOS_PAGO = [
   },
 ]
 
-// Porcentajes realistas por categoría sobre el dinero disponible (ingreso - ahorro)
-const BUDGET_PCT: Record<string, number> = {
-  alimentacion: 0.28,
-  supermercado: 0.22,
+// ─── Pesos base por categoría (sobre el dinero disponible) ───────────────────
+// Estos son los pesos RELATIVOS — no son porcentajes fijos del ingreso.
+// 'otros' siempre se agrega al final con el sobrante.
+const BUDGET_WEIGHTS: Record<string, number> = {
+  alimentacion:  0.28,
+  supermercado:  0.22,
   transporte:    0.15,
   salidas:       0.12,
   servicios:     0.10,
   suscripciones: 0.05,
   salud:         0.08,
-  otros:         0.10,
 }
 
-function calcularDistribucion(
+// El sobrante que queda después de repartir las categorías elegidas
+// va todo a 'otros'. Mínimo 10% del disponible.
+const OTROS_MIN_PCT = 0.10
+
+/**
+ * Calcula la distribución de presupuestos para las categorías elegidas,
+ * reservando siempre un monto para 'otros'.
+ */
+export function calcularDistribucion(
   categorias: string[],
   disponible: number
 ): Record<string, number> {
-  if (categorias.length === 0) return {}
+  if (disponible <= 0) return {}
 
-  // Sumar los pesos de las categorías seleccionadas
-  const totalPeso = categorias.reduce((s, c) => s + (BUDGET_PCT[c] ?? 0.10), 0)
+  const reservaOtros   = Math.round(disponible * OTROS_MIN_PCT)
+  const paraDistribuir = disponible - reservaOtros
 
-  return categorias.reduce<Record<string, number>>((acc, cat) => {
-    const peso = BUDGET_PCT[cat] ?? 0.10
-    acc[cat] = Math.round((peso / totalPeso) * disponible)
-    return acc
-  }, {})
+  if (categorias.length === 0) return { otros: disponible }
+
+  const totalPeso = categorias.reduce((s, c) => s + (BUDGET_WEIGHTS[c] ?? 0.10), 0)
+
+  const distribucion: Record<string, number> = {}
+  let asignado = 0
+
+  categorias.forEach((cat, idx) => {
+    const peso = BUDGET_WEIGHTS[cat] ?? 0.10
+    if (idx === categorias.length - 1) {
+      distribucion[cat] = paraDistribuir - asignado
+    } else {
+      const monto = Math.round((peso / totalPeso) * paraDistribuir)
+      distribucion[cat] = monto
+      asignado += monto
+    }
+  })
+
+  // Siempre al final: 'otros' con la reserva
+  distribucion['otros'] = reservaOtros
+
+  return distribucion
+}
+
+/**
+ * Recalcula los límites cuando se agrega un budget nuevo a una distribución existente.
+ * Reduce proporcionalmente los demás para que sigan sumando al disponible total.
+ */
+export function recalcularAlAgregar(
+  categoriasExistentes: Record<string, number>,
+  nuevaCategoria: string,
+  disponible: number
+): Record<string, number> {
+  const peso       = BUDGET_WEIGHTS[nuevaCategoria] ?? 0.10
+  const montoNuevo = Math.round(disponible * peso)
+
+  const totalExistente  = Object.values(categoriasExistentes).reduce((s, v) => s + v, 0)
+  const factorReduccion = Math.max(0, (totalExistente - montoNuevo)) / Math.max(1, totalExistente)
+
+  const resultado: Record<string, number> = {}
+
+  Object.keys(categoriasExistentes).forEach(cat => {
+    if (cat === 'otros') return  // 'otros' se recalcula al final
+    resultado[cat] = Math.round(categoriasExistentes[cat] * factorReduccion)
+  })
+
+  resultado[nuevaCategoria] = montoNuevo
+
+  const yaAsignado = Object.values(resultado).reduce((s, v) => s + v, 0)
+  resultado['otros'] = Math.max(
+    Math.round(disponible * OTROS_MIN_PCT),
+    disponible - yaAsignado
+  )
+
+  return resultado
 }
 
 const fmt = (n: number) => `$${Math.round(n).toLocaleString('es-AR')}` 
@@ -167,9 +226,10 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
       const { data: { session } } = await supabase.auth.getSession()
       const userId = session?.user?.id ?? null
 
-      const disponible = formData.ingreso - formData.objetivo
+      const disponible   = formData.ingreso - formData.objetivo
+      // 'otros' se incluye siempre en la distribución, no lo selecciona el usuario
       const distribucion = calcularDistribucion(formData.categorias, disponible)
-      const mesActual = new Date().toISOString().slice(0, 7)
+      const mesActual    = new Date().toISOString().slice(0, 7)
 
       // 1. Guardar perfil en Supabase (upsert por user_id)
       if (userId) {
@@ -364,6 +424,10 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
                 )
               })}
             </div>
+            {/* Nota sobre 'otros' */}
+            <p className="text-white/25 text-xs text-center">
+              📦 "Otros" se agrega automáticamente para gastos varios
+            </p>
             <NavButtons
               onBack={() => setStep(2)}
               onNext={() => setStep(4)}
@@ -514,9 +578,20 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
 
       // ── 7: Resumen ─────────────────────────────────────────
       case 7: {
-        const disponible = formData.ingreso - formData.objetivo
+        const disponible   = formData.ingreso - formData.objetivo
         const distribucion = calcularDistribucion(formData.categorias, disponible)
-        const medioLabel = MEDIOS_PAGO.find(m => m.id === formData.medioPago)?.label ?? ''
+        const medioLabel   = MEDIOS_PAGO.find(m => m.id === formData.medioPago)?.label ?? ''
+
+        const emojiMap: Record<string, string> = {
+          alimentacion: '🍔', supermercado: '🛒', transporte: '🚌',
+          salidas: '🎉', servicios: '💡', suscripciones: '📱', salud: '🏥', otros: '📦',
+        }
+        const labelMap: Record<string, string> = {
+          alimentacion: 'Comida y delivery', supermercado: 'Supermercado',
+          transporte: 'Transporte y nafta', salidas: 'Salidas',
+          servicios: 'Servicios básicos', suscripciones: 'Suscripciones',
+          salud: 'Salud', otros: 'Varios y otros',
+        }
 
         return (
           <div className="space-y-5">
@@ -526,8 +601,8 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
 
             {/* Resumen numérico */}
             <div className="bg-[#141A17] border border-white/8 rounded-2xl p-4 space-y-3">
-              <Row label="Ingreso mensual" value={fmt(formData.ingreso)} />
-              <Row label="Objetivo de ahorro" value={fmt(formData.objetivo)} highlight="green" />
+              <Row label="Ingreso mensual"        value={fmt(formData.ingreso)} />
+              <Row label="Objetivo de ahorro"     value={fmt(formData.objetivo)} highlight="green" />
               <Row label="Disponible para gastos" value={fmt(disponible)} />
               <Row label="Medio de pago habitual" value={medioLabel} />
             </div>
@@ -539,20 +614,27 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
               </p>
               <div className="space-y-2">
                 {Object.entries(distribucion).map(([cat, monto]) => {
-                  const info = CATEGORIAS.find(c => c.id === cat)
-                  const pct = Math.round((monto / disponible) * 100)
+                  const pct     = Math.round((monto / disponible) * 100)
+                  const isOtros = cat === 'otros'
                   return (
                     <div key={cat} className="flex items-center gap-3">
-                      <span className="text-lg w-7 text-center">{info?.emoji}</span>
+                      <span className="text-lg w-7 text-center">{emojiMap[cat] ?? '📦'}</span>
                       <div className="flex-1">
                         <div className="flex justify-between mb-0.5">
-                          <span className="text-white/70 text-xs">{info?.label ?? cat}</span>
+                          <span className={`text-xs ${isOtros ? 'text-white/40' : 'text-white/70'}`}>
+                            {labelMap[cat] ?? cat}
+                            {isOtros && <span className="ml-1 text-[10px] text-white/25">(gastos varios)</span>}
+                          </span>
                           <span className="text-white text-xs font-semibold">{fmt(monto)}</span>
                         </div>
                         <div className="h-1 bg-white/5 rounded-full overflow-hidden">
                           <div
-                            className="h-full bg-[#00C853]/60 rounded-full"
-                            style={{ width: `${pct}%` }}
+                            className="h-full rounded-full"
+                            style={{
+                              width: `${pct}%`,
+                              backgroundColor: isOtros ? 'rgba(255,255,255,0.15)' : '#00C853',
+                              opacity: isOtros ? 0.6 : 1,
+                            }}
                           />
                         </div>
                       </div>
@@ -560,6 +642,9 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
                   )
                 })}
               </div>
+              <p className="text-white/20 text-[10px] mt-3">
+                Podés ajustar estos límites en cualquier momento desde la sección de presupuestos.
+              </p>
             </div>
 
             <div className="flex gap-3">

@@ -5,8 +5,8 @@
 
 import { useMemo, useRef, useEffect } from 'react';
 import { useSimpleSupabase } from './useSimpleSupabase';
-import { Transaction, Goal, Budget, Categoria } from '../lib/types';
-import { CATEGORIAS_FIJAS } from '../lib/types';
+import type { SimpleAccount, SimpleInstallment } from './useSimpleSupabase';
+import type { Transaction, Goal, Budget } from '../lib/types';
 
 // Funciones adaptadoras (fuera del hook principal para mayor limpieza)
 const adaptSimpleTransaction = (st: any): Transaction => ({
@@ -105,30 +105,37 @@ export function useSimpleAdaptedData(selectedMonth?: string) {
       }
     });
     
+    const accounts: SimpleAccount[]      = simpleData.accounts      || [];
+    const installments: SimpleInstallment[] = simpleData.installments || [];
+
     return {
       transactions,
       goals,
       budgets,
+      accounts,
+      installments,
       loading: simpleData.loading,
       error: simpleData.error,
       refresh: simpleData.refresh,
-      refreshWithMonth: (month?: string) => simpleData.refresh(month || targetMonth), // Wrapper que acepta mes
-      // Funciones de actualización (no necesitamos adaptarlas)
+      refreshWithMonth: (month?: string) => simpleData.refresh(month || targetMonth),
       updateGoal: simpleData.updateGoal,
       updateBudget: simpleData.updateBudget,
-      createGoal: simpleData.createGoal
+      createGoal: simpleData.createGoal,
+      createAccount: simpleData.createAccount,
     };
   }, [
-    // Dependencias estables - solo primitivos y arrays estables
     simpleData.loading,
     simpleData.error,
     simpleData.transactions?.length,
     simpleData.goals?.length,
     simpleData.budgets?.length,
+    simpleData.accounts?.length,
+    simpleData.installments?.length,
     simpleData.refresh,
     simpleData.updateGoal,
     simpleData.updateBudget,
     simpleData.createGoal,
+    simpleData.createAccount,
     targetMonth
   ]);
   
