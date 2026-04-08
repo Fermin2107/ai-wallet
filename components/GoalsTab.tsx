@@ -1,587 +1,407 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Target, TrendingUp, Calendar, Award, Plus, Edit2, X, Check } from 'lucide-react';
+import { Plus, Edit2, X, Check, Clock, ChevronRight } from 'lucide-react';
 import { useSimpleSupabase } from '../hooks/useSimpleSupabase';
 import { supabase } from '../lib/supabase';
 
 interface GoalsTabProps {
   selectedMonth?: string;
-  refreshTrigger?: number; // ← agregar
+  refreshTrigger?: number;
+  onNavigateToChat?: () => void;
 }
 
-export default function GoalsTabSimple({ selectedMonth, refreshTrigger }: GoalsTabProps) {
-  const { goals, loading, error, refresh, updateGoal, createGoal } = useSimpleSupabase();
-  
-  // ← agregar estado para onboardingData
-  const [onboardingData, setOnboardingData] = useState({ 
-    ingreso_mensual: 0, 
-    objetivo_ahorro: 0 
+const fmt = (n: number) => `$${Math.round(n).toLocaleString('es-AR')}`;
+
+// ─── Hitos ───────────────────────────────────────────────────
+const HITOS = [25, 50, 75, 100] as const;
+type Hito = typeof HITOS[number];
+
+const hitoMensaje: Record<Hito, string> = {
+  25:  '¡Primer cuarto! Ya arrancaste 🙌',
+  50:  '¡Mitad del camino! Ya es real 🎯',
+  75:  '¡Casi! Solo falta el 25% 🔥',
+  100: '¡La completaste! Sos un crack 🎉',
+};
+
+const hitoColor: Record<Hito, string> = {
+  25:  'text-white/50 bg-white/5',
+  50:  'text-[#FFD740] bg-[#FFD740]/10',
+  75:  'text-[#FF6D00] bg-[#FF6D00]/10',
+  100: 'text-[#69F0AE] bg-[#00C853]/15',
+};
+
+function getHitoAlcanzado(pct: number): Hito | null {
+  for (const h of [...HITOS].reverse()) {
+    if (pct >= h) return h;
+  }
+  return null;
+}
+
+// ─── Barra de progreso ───────────────────────────────────────
+function ProgressBar({ pct }: { pct: number }) {
+  const color = pct >= 75 ? '#00C853' : pct >= 40 ? '#FFD740' : '#FF6D00';
+  return (
+    <div className="h-2 bg-white/6 rounded-full overflow-hidden">
+      <div
+        className="h-full rounded-full transition-all duration-700"
+        style={{ width: `${Math.min(pct, 100)}%`, backgroundColor: color }}
+      />
+    </div>
+  );
+}
+
+// ─── Modal ───────────────────────────────────────────────────
+function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center z-50 px-4 pb-4 sm:pb-0">
+      <div className="bg-[#0f1612] border border-white/10 rounded-2xl p-5 w-full max-w-sm max-h-[85vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-5">
+          <p className="text-white font-semibold">{title}</p>
+          <button onClick={onClose} className="text-white/30 hover:text-white/60 transition-colors">
+            <X size={18} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="mb-4">
+      <label className="text-white/40 text-xs block mb-1.5">{label}</label>
+      {children}
+    </div>
+  );
+}
+
+const inputClass = "w-full bg-white/5 border border-white/10 rounded-xl px-3 py-3 text-white text-sm placeholder-white/20 focus:outline-none focus:border-[#00C853]/40";
+
+export default function GoalsTab({ selectedMonth, refreshTrigger, onNavigateToChat }: GoalsTabProps) {
+  const { goals, loading, refresh, updateGoal, createGoal } = useSimpleSupabase();
+
+  const [onboarding, setOnboarding]   = useState({ ingreso_mensual: 0, objetivo_ahorro: 0 });
+  const [showCreate, setShowCreate]   = useState(false);
+  const [editingId, setEditingId]     = useState<string | null>(null);
+  const [hitos, setHitos]             = useState<Record<string, Hito>>({});
+
+  // ── Form state ──
+  const [form, setForm] = useState({
+    name: '', icon: '🎯', target_amount: 0, current_amount: 0,
+    target_date: '', color: 'text-emerald-500'
   });
 
-  // ← agregar efecto para refresh trigger
   useEffect(() => {
-    if (refreshTrigger && refreshTrigger > 0) {
-      refresh();
-    }
+    if (refreshTrigger && refreshTrigger > 0) refresh();
   }, [refreshTrigger]);
 
-  // ← agregar efecto para cargar onboardingData
   useEffect(() => {
     const load = async () => {
-      const { data: { user } } = await supabase.auth.getUser()
-      const userId = user?.id
-      if (!userId) return
-      const stored = localStorage.getItem(`ai_wallet_onboarding_${userId}`)
-      if (stored) setOnboardingData(JSON.parse(stored))
-    }
-    load()
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const stored = localStorage.getItem(`ai_wallet_onboarding_${user.id}`);
+      if (stored) setOnboarding(JSON.parse(stored));
+    };
+    load();
   }, []);
-  
-  // Debug temporal
-  console.log('🔍 GoalsTab - Estado:', { loading, error, goalsCount: goals?.length });
-  
-  // Estados para modales
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showEditModal, setShowEditModal] = useState<string | null>(null);
-  const [newGoal, setNewGoal] = useState({
-    name: '',
-    icon: '🎯',
-    target_amount: 0,
-    target_date: '',
-    color: 'text-emerald-500'
-  });
-  const [editingGoal, setEditingGoal] = useState({
-    name: '',
-    target_amount: 0,
-    current_amount: 0,
-    target_date: '',
-    icon: '🎯',
-    color: 'text-emerald-500'
-  });
 
-  // Validación de máximo 3 metas activas
-  const metasActivas = goals.filter(g => !g.is_completed)
-  const puedeCrearMeta = metasActivas.length < 3
-
-  // Cálculo para proyección dinámica
-  const ingresoMensual = onboardingData.ingreso_mensual || 0
-  const objetivoAhorro = onboardingData.objetivo_ahorro || 0
-
-  // Aporte estimado por meta
-  const metasActivasCount = goals.filter(g => !g.is_completed).length
-  const disponibleParaMetas = Math.max(0, ingresoMensual - objetivoAhorro)
-  const aportePorMeta = metasActivasCount > 0 
-    ? disponibleParaMetas / metasActivasCount / 3
-    : 0
-
-  // Función de verificación de hitos
-  const verificarHitos = (metas: typeof goals) => {
-    metas.forEach(meta => {
-      if (meta.is_completed) return
-      const porcentaje = (meta.current_amount / meta.target_amount) * 100
-      const hito = [25, 50, 75, 100].find(h => porcentaje >= h)
-      if (!hito) return
-      
-      const hitoKey = `hito_${meta.id}_${hito}` 
-      if (localStorage.getItem(hitoKey)) return
-      
-      localStorage.setItem(hitoKey, 'true')
-      
-      const mensajes: Record<number, string> = {
-        25: `¡Llegaste al 25% de "${meta.name}"! Buen arranque 🙌`,
-        50: `¡Mitad del camino para "${meta.name}"! Ya es real 🎯`,
-        75: `¡Casi! Solo falta el 25% para "${meta.name}" 🔥`,
-        100: `¡Completaste "${meta.name}"! Sos un crack 🎉` 
-      }
-      
-      alert(mensajes[hito])
-    })
-  }
-
-  // useEffect para verificar hitos
+  // ── Detectar hitos alcanzados ──
   useEffect(() => {
-    if (goals.length > 0) verificarHitos(goals)
-  }, [goals])
-
-  // Función para crear nueva meta
-  const handleCreateGoal = async () => {
-    if (!newGoal.name || newGoal.target_amount <= 0) return;
-    
-    const success = await createGoal({
-      name: newGoal.name,
-      target_amount: newGoal.target_amount,
-      current_amount: 0,
-      target_date: newGoal.target_date || undefined,
-      icon: newGoal.icon,
-      color: newGoal.color
+    const nuevos: Record<string, Hito> = {};
+    goals.filter(g => !g.is_completed).forEach(g => {
+      const pct = g.target_amount > 0 ? (g.current_amount / g.target_amount) * 100 : 0;
+      const hito = getHitoAlcanzado(pct);
+      if (!hito) return;
+      const key = `hito_${g.id}_${hito}`;
+      if (!localStorage.getItem(key)) {
+        nuevos[g.id] = hito;
+        localStorage.setItem(key, 'true');
+      }
     });
-    
-    if (success) {
-      setShowCreateModal(false);
-      setNewGoal({
-        name: '',
-        icon: '🎯',
-        target_amount: 0,
-        target_date: '',
-        color: 'text-emerald-500'
-      });
-    }
+    if (Object.keys(nuevos).length > 0) setHitos(prev => ({ ...prev, ...nuevos }));
+  }, [goals]);
+
+  // ── Cálculos ──
+  const metasActivas     = goals.filter(g => !g.is_completed);
+  const metasCompletadas = goals.filter(g => g.is_completed);
+  const puedeCrear       = metasActivas.length < 3;
+
+  const disponible    = Math.max(0, onboarding.ingreso_mensual - onboarding.objetivo_ahorro);
+  const aportePorMeta = metasActivas.length > 0 ? disponible / metasActivas.length / 3 : 0;
+
+  const openCreate = () => {
+    setForm({ name: '', icon: '🎯', target_amount: 0, current_amount: 0, target_date: '', color: 'text-emerald-500' });
+    setShowCreate(true);
   };
 
-  // Función para actualizar meta
-  const handleUpdateGoal = async (goalId: string) => {
-    if (!editingGoal.name || editingGoal.target_amount <= 0) return;
-    
-    const success = await updateGoal(goalId, {
-      name: editingGoal.name,
-      target_amount: editingGoal.target_amount,
-      current_amount: editingGoal.current_amount,
-      target_date: editingGoal.target_date || undefined,
-      icon: editingGoal.icon,
-      color: editingGoal.color,
-      is_completed: editingGoal.current_amount >= editingGoal.target_amount
+  const openEdit = (g: typeof goals[0]) => {
+    setForm({
+      name: g.name, icon: g.icon, target_amount: g.target_amount,
+      current_amount: g.current_amount, target_date: g.target_date || '', color: g.color,
     });
-    
-    if (success) {
-      setShowEditModal(null);
-    }
+    setEditingId(g.id);
   };
 
-  // Función para abrir modal de edición
-  const openEditModal = (goal: any) => {
-    setEditingGoal({
-      name: goal.name,
-      target_amount: goal.target_amount,
-      current_amount: goal.current_amount,
-      target_date: goal.target_date || '',
-      icon: goal.icon,
-      color: goal.color
+  const handleCreate = async () => {
+    if (!form.name || form.target_amount <= 0) return;
+    const ok = await createGoal({
+      name: form.name, target_amount: form.target_amount,
+      current_amount: 0, target_date: form.target_date || undefined,
+      icon: form.icon, color: form.color,
     });
-    setShowEditModal(goal.id);
+    if (ok) setShowCreate(false);
   };
 
-  // Función para calcular progreso
-  const getProgressColor = (percentage: number) => {
-    if (percentage >= 100) return 'text-emerald-400';
-    if (percentage >= 75) return 'text-blue-400';
-    if (percentage >= 50) return 'text-yellow-400';
-    return 'text-red-400';
-  };
-
-  const getProgressRingColor = (percentage: number) => {
-    if (percentage >= 100) return 'stroke-emerald-500';
-    if (percentage >= 75) return 'stroke-blue-500';
-    if (percentage >= 50) return 'stroke-yellow-500';
-    return 'stroke-red-500';
-  };
-
-  // Función para formatear fecha
-  const formatDate = (dateString: string) => {
-    if (!dateString) return 'Sin fecha límite';
-    const date = new Date(dateString);
-    return date.toLocaleDateString('es-AR', { 
-      day: 'numeric', 
-      month: 'long', 
-      year: 'numeric' 
+  const handleUpdate = async () => {
+    if (!editingId || !form.name || form.target_amount <= 0) return;
+    const ok = await updateGoal(editingId, {
+      name: form.name, target_amount: form.target_amount,
+      current_amount: form.current_amount, target_date: form.target_date || undefined,
+      icon: form.icon, color: form.color,
+      is_completed: form.current_amount >= form.target_amount,
     });
+    if (ok) setEditingId(null);
   };
 
-  // Función para calcular días restantes
-  const getDaysRemaining = (targetDate?: string) => {
-    if (!targetDate) return null;
-    const today = new Date();
-    const target = new Date(targetDate);
-    const diffTime = target.getTime() - today.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    return diffDays;
+  const pausar = async (id: string) => {
+    await supabase.from('goals').update({ is_active: false }).eq('id', id);
+    setEditingId(null);
+    refresh();
   };
 
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-white">Cargando metas...</div>
+        <div className="w-6 h-6 border-2 border-white/10 border-t-[#00C853] rounded-full animate-spin" />
       </div>
     );
   }
 
-  if (error) {
-    return (
-      <div className="flex flex-col items-center justify-center h-64">
-        <div className="text-red-400 mb-4">Error: {error}</div>
-        <button 
-          onClick={() => refresh(selectedMonth)}
-          className="px-4 py-2 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600"
-        >
-          Reintentar
-        </button>
-      </div>
-    );
-  }
+  const ICONS = ['🎯', '✈️', '💻', '🏠', '🚗', '📚', '🛡️', '💰', '🏖️', '🎸', '💊', '🐕'];
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="bg-slate-900/50 backdrop-blur-sm rounded-2xl p-6 border border-slate-800">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-2xl font-bold text-white mb-2">Mis Metas</h2>
-            <p className="text-slate-400">Seguimiento de objetivos financieros</p>
-          </div>
-          {puedeCrearMeta ? (
-            <button
-              onClick={() => setShowCreateModal(true)}
-              className="flex items-center space-x-2 px-4 py-2 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 transition-colors"
-            >
-              <Plus className="w-5 h-5" />
-              <span>Nueva Meta</span>
-            </button>
-          ) : (
-            <div className="bg-[#141A17] border border-white/5 rounded-2xl p-4 text-center max-w-xs">
-              <p className="text-2xl mb-2">🎯</p>
-              <p className="text-white font-medium mb-1">
-                Ya tenés 3 metas activas
-              </p>
-              <p className="text-white/40 text-sm">
-                Completá una antes de agregar otra. 
-                El foco es clave para ahorrar más.
-              </p>
-            </div>
-          )}
+    <div className="space-y-4 pb-24 md:pb-6">
+
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold text-white">Mis metas</h2>
+          <p className="text-white/35 text-xs mt-0.5">
+            {metasActivas.length}/3 activas
+          </p>
         </div>
-      </div>
-
-      {/* Goals Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {goals.length === 0 ? (
-          <div className="col-span-full flex flex-col items-center justify-center h-64">
-            <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
-              <Target className="w-8 h-8 text-slate-600" />
-            </div>
-            <p className="text-slate-400 text-lg">No hay metas creadas</p>
-            <p className="text-slate-500 text-sm mt-1">Crea tu primera meta para empezar a ahorrar</p>
-          </div>
+        {puedeCrear ? (
+          <button
+            onClick={openCreate}
+            className="flex items-center gap-2 bg-[#00C853] text-black text-sm font-semibold px-4 py-2 rounded-xl hover:bg-[#00C853]/80 active:scale-95 transition-all"
+          >
+            <Plus size={15} /> Nueva
+          </button>
         ) : (
-          goals.map((goal) => {
-            const progressPercentage = Math.min((goal.current_amount / goal.target_amount) * 100, 100);
-            const daysRemaining = getDaysRemaining(goal.target_date);
-            const circumference = 2 * Math.PI * 45;
-            const strokeDashoffset = circumference - (progressPercentage / 100) * circumference;
-            const isCompleted = goal.is_completed || goal.current_amount >= goal.target_amount;
-            
-            return (
-              <div key={goal.id} className="bg-slate-900/50 backdrop-blur-sm rounded-2xl p-6 border border-slate-800 hover:border-emerald-500/50 transition-all duration-300">
-                {/* Header */}
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center space-x-3">
-                    <div className="text-3xl">{goal.icon}</div>
-                    <div>
-                      <h3 className="text-lg font-semibold text-white">{goal.name}</h3>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => openEditModal(goal)}
-                    className="p-2 text-slate-400 hover:text-white transition-colors"
-                  >
-                    <Edit2 className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Progress Ring */}
-                <div className="flex items-center justify-center mb-4">
-                  <div className="relative">
-                    <svg className="w-24 h-24 transform -rotate-90">
-                      <circle
-                        cx="48"
-                        cy="48"
-                        r="45"
-                        stroke="currentColor"
-                        strokeWidth="8"
-                        fill="none"
-                        className="text-slate-700"
-                      />
-                      <circle
-                        cx="48"
-                        cy="48"
-                        r="45"
-                        stroke="currentColor"
-                        strokeWidth="8"
-                        fill="none"
-                        strokeDasharray={circumference}
-                        strokeDashoffset={strokeDashoffset}
-                        className={`${getProgressRingColor(progressPercentage)} transition-all duration-500`}
-                      />
-                    </svg>
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <div className="text-center">
-                        <div className={`text-2xl font-bold ${getProgressColor(progressPercentage)}`}>
-                          {Math.round(progressPercentage)}%
-                        </div>
-                        <div className="text-xs text-slate-400">completado</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Amounts */}
-                <div className="space-y-2 mb-4">
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">Actual:</span>
-                    <span className="text-white font-semibold">
-                      ${goal.current_amount.toLocaleString('es-AR')}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">Objetivo:</span>
-                    <span className="text-white font-semibold">
-                      ${goal.target_amount.toLocaleString('es-AR')}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">Restante:</span>
-                    <span className="text-white font-semibold">
-                      ${Math.max(0, goal.target_amount - goal.current_amount).toLocaleString('es-AR')}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Proyección dinámica */}
-                {!isCompleted && (
-                  (() => {
-                    // Meses restantes para esta meta
-                    const faltante = goal.target_amount - goal.current_amount
-                    const mesesRestantes = aportePorMeta > 0
-                      ? Math.ceil(faltante / aportePorMeta)
-                      : null
-
-                    return (
-                      <p className={`text-xs mt-2 ${
-                        mesesRestantes === null ? 'text-white/30' :
-                        mesesRestantes <= 2 ? 'text-[#00C853]' :
-                        mesesRestantes <= 6 ? 'text-[#FFD740]' :
-                        'text-white/40'
-                      }`}>
-                        {mesesRestantes === null 
-                          ? 'Agregá tu ingreso para ver proyección'
-                          : `A este ritmo: ~${mesesRestantes} ${mesesRestantes === 1 ? 'mes' : 'meses'}` 
-                        }
-                      </p>
-                    )
-                  })()
-                )}
-
-                {/* Status */}
-                <div className="flex items-center justify-between pt-4 border-t border-slate-800">
-                  <div className="flex items-center space-x-2">
-                    {isCompleted ? (
-                      <>
-                        <Check className="w-4 h-4 text-emerald-400" />
-                        <span className="text-emerald-400 text-sm">Completada</span>
-                      </>
-                    ) : (
-                      <>
-                        <TrendingUp className="w-4 h-4 text-blue-400" />
-                        <span className="text-blue-400 text-sm">En progreso</span>
-                      </>
-                    )}
-                  </div>
-                  {daysRemaining !== null && (
-                    <span className="text-slate-400 text-sm">
-                      {daysRemaining > 0 ? `${daysRemaining} días` : 'Vencida'}
-                    </span>
-                  )}
-                </div>
-              </div>
-            );
-          })
+          <div className="bg-[#141A17] border border-white/5 rounded-xl px-3 py-2 max-w-[160px] text-center">
+            <p className="text-white/50 text-xs">Completá una antes de agregar otra</p>
+          </div>
         )}
       </div>
 
-      {/* Metas Completadas */}
-      {(() => {
-        const completadas = goals.filter(g => g.is_completed)
-        if (completadas.length === 0) return null
-        return (
-          <div className="mt-6">
-            <p className="text-white/40 text-xs font-medium mb-3 uppercase tracking-wider">
-              Mis victorias 🏆 ({completadas.length})
-            </p>
-            <div className="space-y-2">
-              {completadas.map(meta => (
-                <div key={meta.id} 
-                     className="bg-[#141A17] border border-white/5 
-                                rounded-xl p-3 flex items-center gap-3 
-                                opacity-60">
-                  <span className="text-lg">{meta.icon}</span>
-                  <div className="flex-1">
-                    <p className="text-white text-sm">{meta.name}</p>
-                    <p className="text-[#00C853] text-xs">
-                      ✅ Completada · 
-                      ${meta.target_amount.toLocaleString('es-AR')}
-                    </p>
+      {/* ── Metas activas ── */}
+      {metasActivas.length === 0 && (
+        <div className="bg-[#111714] border border-white/5 rounded-2xl p-8 text-center">
+          <p className="text-4xl mb-3">🎯</p>
+          <p className="text-white/60 font-medium mb-1">Sin metas todavía</p>
+          <p className="text-white/30 text-sm mb-4">Creá tu primera meta para empezar a ahorrar con propósito</p>
+          <button onClick={openCreate} className="bg-[#00C853] text-black text-sm font-semibold px-5 py-2.5 rounded-xl">
+            Crear mi primera meta
+          </button>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {metasActivas.map((meta) => {
+          const pct         = Math.min((meta.current_amount / meta.target_amount) * 100, 100);
+          const faltante    = meta.target_amount - meta.current_amount;
+          const hitoActual  = hitos[meta.id];
+          const mesesRest   = aportePorMeta > 0 ? Math.ceil(faltante / aportePorMeta) : null;
+
+          const diasHastaFecha = meta.target_date
+            ? Math.ceil((new Date(meta.target_date).getTime() - Date.now()) / 86400000)
+            : null;
+
+          return (
+            <div key={meta.id} className="bg-[#111714] border border-white/5 rounded-2xl p-5">
+
+              {/* Hito alcanzado — banner inline, no alert */}
+              {hitoActual && (
+                <div className={`flex items-center gap-2 px-3 py-2 rounded-xl mb-3 text-xs font-medium ${hitoColor[hitoActual]}`}>
+                  <span>🏆</span>
+                  <span>{hitoMensaje[hitoActual]}</span>
+                  <button
+                    onClick={() => setHitos(prev => { const n = { ...prev }; delete n[meta.id]; return n; })}
+                    className="ml-auto opacity-50 hover:opacity-100"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              )}
+
+              {/* Header de la meta */}
+              <div className="flex items-start justify-between mb-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className="text-2xl shrink-0">{meta.icon}</span>
+                  <div className="min-w-0">
+                    <p className="text-white font-semibold text-sm truncate">{meta.name}</p>
+                    {diasHastaFecha !== null && (
+                      <p className={`text-[10px] flex items-center gap-1 mt-0.5 ${diasHastaFecha < 30 ? 'text-[#FF6D00]' : 'text-white/30'}`}>
+                        <Clock size={9} />
+                        {diasHastaFecha > 0 ? `${diasHastaFecha} días` : 'Vencida'}
+                      </p>
+                    )}
                   </div>
                 </div>
-              ))}
-            </div>
-          </div>
-        )
-      })()}
+                <button
+                  onClick={() => openEdit(meta)}
+                  className="p-1.5 text-white/20 hover:text-white/50 transition-colors shrink-0"
+                >
+                  <Edit2 size={14} />
+                </button>
+              </div>
 
-      {/* Create Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-slate-900 rounded-2xl p-6 w-full max-w-md border border-slate-800">
-            <h3 className="text-xl font-bold text-white mb-4">Nueva Meta</h3>
-            
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Nombre</label>
-                <input
-                  type="text"
-                  value={newGoal.name}
-                  onChange={(e) => setNewGoal({ ...newGoal, name: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-emerald-500 focus:outline-none"
-                  placeholder="Ej: Vacaciones en Brasil"
-                />
+              {/* Barra */}
+              <ProgressBar pct={pct} />
+
+              {/* Números */}
+              <div className="flex items-center justify-between mt-2">
+                <p className="text-white/30 text-xs tabular-nums">
+                  {fmt(meta.current_amount)} de {fmt(meta.target_amount)}
+                </p>
+                <p className="text-white/60 text-xs font-semibold tabular-nums">{Math.round(pct)}%</p>
               </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Monto objetivo</label>
-                <input
-                  type="number"
-                  value={newGoal.target_amount}
-                  onChange={(e) => setNewGoal({ ...newGoal, target_amount: parseFloat(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-emerald-500 focus:outline-none"
-                  placeholder="50000"
-                />
+
+              {/* Proyección + acción */}
+              <div className="flex items-center justify-between mt-3 pt-3 border-t border-white/5">
+                <p className={`text-xs ${
+                  mesesRest === null ? 'text-white/20' :
+                  mesesRest <= 2 ? 'text-[#69F0AE]' :
+                  mesesRest <= 6 ? 'text-[#FFD740]' : 'text-white/35'
+                }`}>
+                  {mesesRest === null
+                    ? 'Sin proyección'
+                    : mesesRest <= 1 ? '¡Este mes llegás! 🎉'
+                    : `~${mesesRest} meses a este ritmo`}
+                </p>
+                <button
+                  onClick={onNavigateToChat}
+                  className="text-[10px] text-[#00C853]/60 hover:text-[#00C853] transition-colors flex items-center gap-1"
+                >
+                  Aportar <ChevronRight size={10} />
+                </button>
               </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Fecha límite (opcional)</label>
-                <input
-                  type="date"
-                  value={newGoal.target_date}
-                  onChange={(e) => setNewGoal({ ...newGoal, target_date: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-emerald-500 focus:outline-none"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Icono</label>
-                <div className="flex space-x-2">
-                  {['🎯', '✈️', '💻', '🏠', '🚗', '📚', '🛡️', '💰'].map((icon) => (
-                    <button
-                      key={icon}
-                      onClick={() => setNewGoal({ ...newGoal, icon })}
-                      className={`p-2 rounded-lg border ${
-                        newGoal.icon === icon
-                          ? 'border-emerald-500 bg-emerald-500/20'
-                          : 'border-slate-700 bg-slate-800'
-                      }`}
-                    >
-                      {icon}
-                    </button>
-                  ))}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Metas completadas ── */}
+      {metasCompletadas.length > 0 && (
+        <div>
+          <p className="text-white/25 text-[10px] font-semibold uppercase tracking-widest mb-2.5">
+            Victorias 🏆 ({metasCompletadas.length})
+          </p>
+          <div className="space-y-2">
+            {metasCompletadas.map(meta => (
+              <div key={meta.id} className="flex items-center gap-3 bg-[#111714]/50 border border-white/4 rounded-xl px-4 py-3 opacity-55">
+                <span className="text-lg shrink-0">{meta.icon}</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-white/60 text-sm truncate">{meta.name}</p>
+                  <p className="text-[#00C853]/60 text-xs">{fmt(meta.target_amount)} completado</p>
                 </div>
+                <Check size={15} className="text-[#00C853]/50 shrink-0" />
               </div>
-            </div>
-            
-            <div className="flex justify-end space-x-3 mt-6">
-              <button
-                onClick={() => setShowCreateModal(false)}
-                className="px-4 py-2 text-slate-400 hover:text-white transition-colors"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={handleCreateGoal}
-                disabled={!newGoal.name || newGoal.target_amount <= 0}
-                className="px-4 py-2 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                Crear Meta
-              </button>
-            </div>
+            ))}
           </div>
         </div>
       )}
 
-      {/* Edit Modal */}
-      {showEditModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-slate-900 rounded-2xl p-6 w-full max-w-md border border-slate-800">
-            <h3 className="text-xl font-bold text-white mb-4">Editar Meta</h3>
-            
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Nombre</label>
-                <input
-                  type="text"
-                  value={editingGoal.name}
-                  onChange={(e) => setEditingGoal({ ...editingGoal, name: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-emerald-500 focus:outline-none"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Monto objetivo</label>
-                <input
-                  type="number"
-                  value={editingGoal.target_amount}
-                  onChange={(e) => setEditingGoal({ ...editingGoal, target_amount: parseFloat(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-emerald-500 focus:outline-none"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Monto actual</label>
-                <input
-                  type="number"
-                  value={editingGoal.current_amount}
-                  onChange={(e) => setEditingGoal({ ...editingGoal, current_amount: parseFloat(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-emerald-500 focus:outline-none"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">Fecha límite (opcional)</label>
-                <input
-                  type="date"
-                  value={editingGoal.target_date}
-                  onChange={(e) => setEditingGoal({ ...editingGoal, target_date: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-emerald-500 focus:outline-none"
-                />
-              </div>
+      {/* ── Modal Crear ── */}
+      {showCreate && (
+        <Modal title="Nueva meta" onClose={() => setShowCreate(false)}>
+          <Field label="¿Para qué estás ahorrando?">
+            <input type="text" value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))}
+              className={inputClass} placeholder="Ej: Vacaciones en Brasil" autoFocus />
+          </Field>
+          <Field label="Ícono">
+            <div className="flex flex-wrap gap-2">
+              {ICONS.map(ic => (
+                <button key={ic} onClick={() => setForm(p => ({ ...p, icon: ic }))}
+                  className={`w-10 h-10 rounded-xl text-lg flex items-center justify-center transition-all ${form.icon === ic ? 'bg-[#00C853]/20 border border-[#00C853]/40' : 'bg-white/5 border border-white/8 hover:border-white/20'}`}>
+                  {ic}
+                </button>
+              ))}
             </div>
-            
-            <div className="flex justify-end space-x-3 mt-6">
-              <button
-                onClick={() => setShowEditModal(null)}
-                className="px-4 py-2 text-slate-400 hover:text-white transition-colors"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={() => handleUpdateGoal(showEditModal)}
-                disabled={!editingGoal.name || editingGoal.target_amount <= 0}
-                className="px-4 py-2 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                Guardar Cambios
-              </button>
+          </Field>
+          <Field label="¿Cuánto necesitás?">
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30 text-sm">$</span>
+              <input type="number" value={form.target_amount || ''} onChange={e => setForm(p => ({ ...p, target_amount: parseFloat(e.target.value) || 0 }))}
+                className={`${inputClass} pl-7`} placeholder="0" />
             </div>
-
-            <button
-              onClick={async () => {
-                if (!showEditModal) return
-                await supabase.from('goals').update({ is_active: false }).eq('id', showEditModal)
-                setShowEditModal(null)
-                refresh()
-              }}
-              className="w-full mt-3 text-[#FF5252] text-sm py-2"
-            >
-              Pausar esta meta
+          </Field>
+          <Field label="Fecha límite (opcional)">
+            <input type="date" value={form.target_date} onChange={e => setForm(p => ({ ...p, target_date: e.target.value }))}
+              className={inputClass} />
+          </Field>
+          <div className="flex gap-3 mt-2">
+            <button onClick={() => setShowCreate(false)} className="flex-1 bg-white/5 border border-white/10 text-white/50 py-3 rounded-xl text-sm">
+              Cancelar
+            </button>
+            <button onClick={handleCreate} disabled={!form.name || form.target_amount <= 0}
+              className="flex-1 bg-[#00C853] text-black font-semibold py-3 rounded-xl text-sm disabled:opacity-30">
+              Crear meta
             </button>
           </div>
-        </div>
+        </Modal>
+      )}
+
+      {/* ── Modal Editar ── */}
+      {editingId && (
+        <Modal title="Editar meta" onClose={() => setEditingId(null)}>
+          <Field label="Nombre">
+            <input type="text" value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))}
+              className={inputClass} />
+          </Field>
+          <Field label="Monto objetivo">
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30 text-sm">$</span>
+              <input type="number" value={form.target_amount || ''} onChange={e => setForm(p => ({ ...p, target_amount: parseFloat(e.target.value) || 0 }))}
+                className={`${inputClass} pl-7`} />
+            </div>
+          </Field>
+          <Field label="Monto actual">
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30 text-sm">$</span>
+              <input type="number" value={form.current_amount || ''} onChange={e => setForm(p => ({ ...p, current_amount: parseFloat(e.target.value) || 0 }))}
+                className={`${inputClass} pl-7`} />
+            </div>
+          </Field>
+          <Field label="Fecha límite (opcional)">
+            <input type="date" value={form.target_date} onChange={e => setForm(p => ({ ...p, target_date: e.target.value }))}
+              className={inputClass} />
+          </Field>
+          <div className="flex gap-3 mt-2">
+            <button onClick={() => setEditingId(null)} className="flex-1 bg-white/5 border border-white/10 text-white/50 py-3 rounded-xl text-sm">
+              Cancelar
+            </button>
+            <button onClick={handleUpdate} disabled={!form.name || form.target_amount <= 0}
+              className="flex-1 bg-[#00C853] text-black font-semibold py-3 rounded-xl text-sm disabled:opacity-30">
+              Guardar
+            </button>
+          </div>
+          <button onClick={() => pausar(editingId)} className="w-full mt-3 text-[#FF5252]/60 hover:text-[#FF5252] text-sm py-2 transition-colors">
+            Pausar esta meta
+          </button>
+        </Modal>
       )}
     </div>
   );

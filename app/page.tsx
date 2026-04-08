@@ -119,6 +119,7 @@ useEffect(() => {
           selectedMonth={selectedMonth}
           onNavigateToChat={() => setActiveTab('chat')}
           onNavigateToMetas={() => setActiveTab('metas')}
+          onNavigateToBudgets={() => setActiveTab('budgets')}
         />
       )
     case 'chat':
@@ -130,6 +131,13 @@ useEffect(() => {
             setActiveTab('metas')             // ← agregar
             setMetasSubTab('limites')         // ← agregar
           }}                                  // ← agregar
+        />
+      )
+    case 'budgets':
+      return (
+        <BudgetTab
+          selectedMonth={selectedMonth}
+          refreshTrigger={refreshTrigger}
         />
       )
     case 'metas':

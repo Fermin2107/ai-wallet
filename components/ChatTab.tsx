@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { History, X, Plus } from 'lucide-react'
+import { History, X, Plus, Flame, CheckCircle2, TrendingDown, Zap, Target } from 'lucide-react'
 import { useSimpleSupabase } from '../hooks/useSimpleSupabase'
 import { createBrowserClient } from '@supabase/ssr'
 import { useWeeklySummary } from '../hooks/useWeeklySummary'
@@ -19,6 +19,7 @@ interface Message {
   sender: 'user' | 'ai'
   timestamp: Date
   isAuto?: boolean
+  type?: 'normal' | 'success' | 'alert' | 'insight'
 }
 
 interface ChatSession {
@@ -28,7 +29,37 @@ interface ChatSession {
   updated_at: string
 }
 
-// ─── Motor financiero ────────────────────────────────────────
+// ─── Streak helper ───────────────────────────────────────────
+function getStreak(userId: string): number {
+  try {
+    const raw = localStorage.getItem(`ai_wallet_streak_${userId}`)
+    if (!raw) return 0
+    const { lastDate, count } = JSON.parse(raw)
+    const hoy = new Date().toISOString().split('T')[0]
+    const ayer = new Date(Date.now() - 86400000).toISOString().split('T')[0]
+    if (lastDate === hoy) return count
+    if (lastDate === ayer) return count // sigue vigente hoy
+    return 0 // se cortó
+  } catch { return 0 }
+}
+
+function bumpStreak(userId: string): number {
+  try {
+    const hoy = new Date().toISOString().split('T')[0]
+    const raw = localStorage.getItem(`ai_wallet_streak_${userId}`)
+    let count = 1
+    if (raw) {
+      const { lastDate, count: prev } = JSON.parse(raw)
+      const ayer = new Date(Date.now() - 86400000).toISOString().split('T')[0]
+      if (lastDate === hoy) return prev // ya se registró hoy
+      if (lastDate === ayer) count = prev + 1
+    }
+    localStorage.setItem(`ai_wallet_streak_${userId}`, JSON.stringify({ lastDate: hoy, count }))
+    return count
+  } catch { return 1 }
+}
+
+// ─── Motor financiero (sin cambios) ─────────────────────────
 function buildFinancialContext(
   transactions: any[],
   budgets: any[],
@@ -44,7 +75,7 @@ function buildFinancialContext(
 
   const txMes = transactions.filter(t => (t.transaction_date || '').startsWith(selectedMonth))
   const totalIngresado = txMes.filter(t => t.type === 'ingreso').reduce((s, t) => s + Number(t.amount), 0)
-  const totalGastado   = txMes.filter(t => t.type === 'gasto').reduce((s, t)  => s + Number(t.amount), 0)
+  const totalGastado   = txMes.filter(t => t.type === 'gasto').reduce((s, t) => s + Number(t.amount), 0)
   const ingresoEfectivo = totalIngresado > 0 ? totalIngresado : (onboarding.ingreso_mensual || 0)
   const objetivoAhorro  = onboarding.objetivo_ahorro || 0
   const dineroDisponible = ingresoEfectivo - totalGastado
@@ -140,7 +171,7 @@ function autoRespond(msg: string, ctx: ReturnType<typeof buildFinancialContext>)
   }
   if (m.includes('cómo voy') || m.includes('como voy') || m.includes('resumen') || m.includes('estado')) {
     const emoji = ctx.estado === 'bien' ? '🟢' : ctx.estado === 'cuidado' ? '🟡' : '🔴'
-    const proy  = ctx.vaALlegar ? `Proyección: llegás con ${fmt(ctx.superavit)} de sobra.` : `Proyección: te faltan ${fmt(Math.abs(ctx.superavit))} para llegar.`
+    const proy  = ctx.vaALlegar ? `Llegás con ${fmt(ctx.superavit)} de sobra.` : `Te faltan ${fmt(Math.abs(ctx.superavit))} para llegar.`
     return `${emoji} Gastaste ${fmt(ctx.totalGastado)} este mes, te quedan ${fmt(ctx.dineroLibre)} libres. ${proy}${ctx.alertas[0] ? ' ' + ctx.alertas[0] + '.' : ''}`
   }
   const matchPuedo = m.match(/(?:puedo|alcanza|tengo para)[^$\d]*\$?([\d.,]+)/)
@@ -148,106 +179,124 @@ function autoRespond(msg: string, ctx: ReturnType<typeof buildFinancialContext>)
     const monto = parseFloat(matchPuedo[1].replace(/\./g, '').replace(',', '.'))
     if (!isNaN(monto)) {
       const libre = ctx.dineroLibre
-      if (monto > libre) return `No te alcanza. Tenés ${fmt(libre)} disponibles y eso cuesta ${fmt(monto)}. Te quedarías en rojo.`
-      if (monto > libre * 0.5) return `Podés, pero te deja justo. Usarías el ${Math.round((monto / libre) * 100)}% de lo que te queda. Pensalo.`
+      if (monto > libre) return `No te alcanza. Tenés ${fmt(libre)} disponibles y eso cuesta ${fmt(monto)}.`
+      if (monto > libre * 0.5) return `Podés, pero te deja justo. Usarías el ${Math.round((monto / libre) * 100)}% de lo que te queda.`
       return `Sí, andá tranquilo. Tenés ${fmt(libre)} disponibles y eso cuesta ${fmt(monto)}.`
     }
   }
   return null
 }
 
-// ─── Chips ───────────────────────────────────────────────────
-function getChips(ctx: ReturnType<typeof buildFinancialContext> | null, esUsuarioNuevo: boolean): string[] {
-  if (esUsuarioNuevo) {
-    return ['Registrar mi primer gasto', '¿Cómo funciona?', 'Gasté en el super hoy']
-  }
-  if (!ctx || ctx.totalGastado === 0) return ['¿Cómo voy este mes?', 'Registrar un gasto', 'Ver mis metas']
-  if (new Date().getDate() <= 5) return ['Cobré el sueldo 💰', 'Organizame el mes', 'Planificar próximos meses 📅', '¿Cuánto puedo gastar por día?']
-  if (ctx.estado === 'mal') return ['¿Cómo bajo mis gastos?', '¿Cuánto puedo gastar por día?', '¿Cómo voy este mes?']
-  if (ctx.budgetAnalysis.some(b => b.percentUsed >= 80)) return ['¿En qué estoy gastando más?', '¿Cuánto puedo gastar por día?', '¿Cómo voy este mes?']
-  return ['¿Cómo voy este mes?', '¿Cuánto puedo gastar por día?', 'Registrar un gasto']
+// ─── Acciones rápidas (cards tocables) ───────────────────────
+// Reemplazan a los chips de texto plano.
+// Cada card tiene un emoji grande, un label corto y dispara un mensaje predefinido.
+interface QuickAction {
+  id: string
+  emoji: string
+  label: string
+  message: string
+  color: string
 }
 
-// ─── Mensajes proactivos al abrir ────────────────────────────
-function getProactiveMessage(
-  ctx: ReturnType<typeof buildFinancialContext>,
-  onboarding: { nombre?: string }
-): string | null {
+function getQuickActions(ctx: ReturnType<typeof buildFinancialContext> | null, esUsuarioNuevo: boolean): QuickAction[] {
+  const fmt = (n: number) => `$${Math.round(n).toLocaleString('es-AR')}`
+
+  // Usuario nuevo: onboarding directo
+  if (esUsuarioNuevo) {
+    return [
+      { id: 'gasto-rapido', emoji: '☕', label: 'Café / delivery', message: 'Gasté en café hoy', color: 'border-[#FF6D00]/25 bg-[#FF6D00]/8' },
+      { id: 'super', emoji: '🛒', label: 'Supermercado', message: 'Fui al super hoy', color: 'border-white/10 bg-white/4' },
+      { id: 'transporte', emoji: '🚌', label: 'Transporte', message: 'Gasté en transporte hoy', color: 'border-white/10 bg-white/4' },
+      { id: 'otro', emoji: '➕', label: 'Otro gasto', message: 'Quiero registrar un gasto', color: 'border-white/10 bg-white/4' },
+    ]
+  }
+
+  if (!ctx) return []
+
+  const actions: QuickAction[] = []
+
+  // Card 1: siempre — registrar gasto de hoy
+  const hora = new Date().getHours()
+  const label = hora < 12 ? 'Anotar gasto de hoy' : hora < 17 ? 'Anotar almuerzo / salida' : 'Cerrar el día'
+  actions.push({ id: 'anotar', emoji: '✏️', label, message: '¿Cómo voy hoy?', color: 'border-[#00C853]/25 bg-[#00C853]/8' })
+
+  // Card 2: contexto inteligente
+  if (!ctx.vaALlegar) {
+    actions.push({ id: 'plan', emoji: '🎯', label: 'Armá un plan', message: '¿Cómo puedo llegar a fin de mes?', color: 'border-[#FF5252]/20 bg-[#FF5252]/8' })
+  } else if (ctx.estado === 'bien' && ctx.dineroLibre > 0) {
+    actions.push({ id: 'sobra', emoji: '💰', label: `Tengo ${fmt(ctx.dineroLibre)} libres`, message: '¿Qué hago con el dinero que me sobra?', color: 'border-[#00C853]/20 bg-[#00C853]/5' })
+  } else {
+    actions.push({ id: 'status', emoji: '📊', label: '¿Cómo voy?', message: '¿Cómo voy este mes?', color: 'border-white/10 bg-white/4' })
+  }
+
+  // Card 3: presupuesto en riesgo o meta
+  const enRiesgo = ctx.budgetAnalysis.find(b => b.status === 'rojo' && b.category !== 'otros')
+  const metaActiva = ctx.goalAnalysis[0]
+  if (enRiesgo) {
+    actions.push({ id: 'riesgo', emoji: '⚠️', label: `${enRiesgo.category} al ${enRiesgo.percentUsed}%`, message: `¿Cuánto me queda en ${enRiesgo.category}?`, color: 'border-[#FFD740]/20 bg-[#FFD740]/8' })
+  } else if (metaActiva) {
+    actions.push({ id: 'meta', emoji: '🏆', label: metaActiva.name.slice(0, 14), message: `¿Cómo voy con mi meta de ${metaActiva.name}?`, color: 'border-[#69F0AE]/15 bg-[#69F0AE]/5' })
+  } else {
+    actions.push({ id: 'diario', emoji: '📅', label: `${fmt(ctx.gastoDiarioRecomendado)}/día`, message: '¿Cuánto puedo gastar por día?', color: 'border-white/10 bg-white/4' })
+  }
+
+  return actions
+}
+
+// ─── Mensaje proactivo ───────────────────────────────────────
+function getProactiveMessage(ctx: ReturnType<typeof buildFinancialContext>, onboarding: { nombre?: string }): string | null {
   const fmt  = (n: number) => `$${Math.round(n).toLocaleString('es-AR')}`
   const hora       = new Date().getHours()
   const dia        = new Date().getDate()
   const diaSemana  = new Date().getDay()
 
   if (ctx.totalGastado === 0) return null
+  if (diaSemana === 1) return null // lunes lo cubre el weekly
 
-  // Prioridad 1: alerta crítica activa
   const excedido = ctx.budgetAnalysis.find(b => b.status === 'excedido' && b.category !== 'otros')
-  if (excedido) {
-    return `Superaste el límite de ${excedido.category} en ${fmt(Math.abs(excedido.remaining))}. ¿Querés ver en qué gastaste ahí?`
-  }
+  if (excedido) return `Superaste ${excedido.category} en ${fmt(Math.abs(excedido.remaining))}. ¿Querés ver en qué gastaste ahí?`
 
-  // Prioridad 2: proyección negativa
-  if (!ctx.vaALlegar && ctx.diasRestantes > 5) {
-    return `A este ritmo te van a faltar ${fmt(Math.abs(ctx.superavit))} para llegar a fin de mes. ¿Armamos un plan para ajustar?`
-  }
+  if (!ctx.vaALlegar && ctx.diasRestantes > 5) return `A este ritmo te van a faltar ${fmt(Math.abs(ctx.superavit))} para llegar a fin de mes. ¿Armamos un plan?`
 
-  // Prioridad 3: cerca del límite en categoría relevante
   const enRiesgo = ctx.budgetAnalysis.find(b => b.status === 'rojo' && b.category !== 'otros')
-  if (enRiesgo) {
-    return `${enRiesgo.category} está al ${enRiesgo.percentUsed}% del límite y quedan ${ctx.diasRestantes} días. ¿Revisamos?`
-  }
+  if (enRiesgo) return `${enRiesgo.category} está al ${enRiesgo.percentUsed}% del límite, quedan ${ctx.diasRestantes} días. ¿Revisamos?`
 
-  // Prioridad 4: lunes = lo cubre el weekly summary
-  if (diaSemana === 1) return null
+  if (dia <= 3 && ctx.totalIngresado === 0) return `¿Ya llegó el sueldo? Registralo para que el plan funcione bien.`
 
-  // Prioridad 5: primeros días del mes, sin ingreso registrado
-  if (dia <= 3 && ctx.totalIngresado === 0) {
-    return `¿Ya cobró el sueldo este mes? Registralo para que el plan funcione bien.`
-  }
+  if (ctx.estado === 'bien' && ctx.diasRestantes <= 7) return `Vas a cerrar el mes en verde con ${fmt(ctx.superavit)} de sobra 🟢`
 
-  // Prioridad 6: buenas noticias al final del mes
-  if (ctx.estado === 'bien' && ctx.diasRestantes <= 7) {
-    return `Vas a cerrar el mes en verde con ${fmt(ctx.superavit)} de sobra. Buen trabajo 🟢`
-  }
-
-  // Prioridad 7: contexto horario sutil
-  if (hora >= 12 && hora <= 14 && ctx.gastoDiarioRecomendado > 0) {
-    return `Hoy podés gastar hasta ${fmt(ctx.gastoDiarioRecomendado)} para llegar bien a fin de mes. ¿Qué gastaste hasta ahora?`
-  }
-  if (hora >= 20 && ctx.gastoDiarioRecomendado > 0) {
-    return `¿Cómo terminó el día? Si gastaste algo, lo anoto.`
-  }
+  if (hora >= 20) return `¿Cómo terminó el día? Si gastaste algo, lo anoto.`
+  if (hora >= 12 && hora <= 14 && ctx.gastoDiarioRecomendado > 0) return `Recordatorio de mediodía: podés gastar hasta ${fmt(ctx.gastoDiarioRecomendado)} hoy.`
 
   return null
 }
 
-// ─── Welcome según estado ────────────────────────────────────
-function getWelcome(
-  ctx: ReturnType<typeof buildFinancialContext> | null,
-  esUsuarioNuevo: boolean,
-  nombre?: string
-): string {
+// ─── Welcome ─────────────────────────────────────────────────
+function getWelcome(ctx: ReturnType<typeof buildFinancialContext> | null, esUsuarioNuevo: boolean, nombre?: string, streak?: number): string {
   const fmt    = (n: number) => `$${Math.round(n).toLocaleString('es-AR')}`
   const saludo = nombre ? `, ${nombre}` : ''
+  const hora   = new Date().getHours()
+  const greeting = hora < 12 ? 'Buenos días' : hora < 19 ? 'Buenas tardes' : 'Buenas noches'
 
   if (esUsuarioNuevo) {
-    return `¡Hola${saludo}! Para arrancar necesito saber en qué gastás. ¿Cuál fue tu último gasto? Puede ser cualquier cosa — café, nafta, supermercado.`
+    return `${greeting}${saludo}! Para empezar, contame tu último gasto — puede ser cualquier cosa. Café, nafta, supermercado. Lo registro al toque.`
   }
 
   if (!ctx || ctx.totalGastado === 0) {
-    return `¡Bienvenido${saludo}! Todavía no registraste gastos este mes. ¿Qué fue lo último que gastaste?`
+    return `${greeting}${saludo}! Todavía no registraste gastos este mes. ¿Qué fue lo último que pagaste?`
   }
 
   if (ctx.estado === 'bien') {
-    return `Todo bien${saludo} 🟢 Gastaste ${fmt(ctx.totalGastado)} este mes, te quedan ${fmt(ctx.dineroLibre)} libres. Podés gastar ${fmt(ctx.gastoDiarioRecomendado)}/día. ¿Registramos algo?`
+    const streakMsg = streak && streak > 1 ? ` ${streak} días seguidos registrando 🔥` : ''
+    return `${greeting}${saludo}!${streakMsg} Gastaste ${fmt(ctx.totalGastado)} este mes, te quedan ${fmt(ctx.dineroLibre)} libres. ¿Qué registramos hoy?`
   }
   if (ctx.estado === 'cuidado') {
-    return `Ojo con los gastos${saludo} 🟡 Ya gastaste ${fmt(ctx.totalGastado)} y te quedan ${fmt(ctx.dineroLibre)} libres. Podés gastar ${fmt(ctx.gastoDiarioRecomendado)}/día. ¿Qué más gastaste?`
+    return `${greeting}${saludo}! Ya gastaste ${fmt(ctx.totalGastado)} y te quedan ${fmt(ctx.dineroLibre)} libres — ${fmt(ctx.gastoDiarioRecomendado)}/día. ¿Qué gastos registramos?`
   }
-  return `Estás complicado este mes${saludo} 🔴 Gastaste ${fmt(ctx.totalGastado)} y a este ritmo no llegás. ¿Querés ver en qué ajustar?`
+  return `${greeting}${saludo}! Gastaste ${fmt(ctx.totalGastado)} y a este ritmo no llegás a fin de mes. ¿Armamos un plan ya?`
 }
 
-// ─── Formato de fecha sidebar ────────────────────────────────
+// ─── Formato fecha sidebar ────────────────────────────────────
 function formatSessionDate(iso: string): string {
   const d   = new Date(iso)
   const now = new Date()
@@ -262,7 +311,7 @@ function formatSessionDate(iso: string): string {
 
 const ACCIONES_QUE_MODIFICAN = ['INSERT_TRANSACTION', 'CREATE_GOAL', 'CREATE_BUDGET', 'UPDATE_GOAL_PROGRESS']
 
-// ─── Componente principal ────────────────────────────────────
+// ─── Componente principal ─────────────────────────────────────
 export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudgets }: ChatTabProps) {
   const { transactions, budgets, goals, refresh } = useSimpleSupabase()
 
@@ -271,30 +320,27 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
   )
 
-  // ── Estado del chat ──
   const [messages, setMessages]                       = useState<Message[]>([])
   const [conversationHistory, setConversationHistory] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([])
   const [activeSessionId, setActiveSessionId]         = useState<string | null>(null)
 
-  // ── Estado del sidebar ──
   const [sidebarOpen, setSidebarOpen]         = useState(false)
   const [sessions, setSessions]               = useState<ChatSession[]>([])
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [loadingMessages, setLoadingMessages] = useState(false)
 
-  // ── Estado general ──
   const [inputValue, setInputValue]       = useState('')
   const [isLoading, setIsLoading]         = useState(false)
   const [ctx, setCtx]                     = useState<ReturnType<typeof buildFinancialContext> | null>(null)
   const [onboarding, setOnboarding]       = useState<{ nombre?: string; ingreso_mensual?: number; objetivo_ahorro?: number }>({})
+  const [userId, setUserId]               = useState<string | null>(null)
+  const [streak, setStreak]               = useState(0)
+  const [showSuccessFlash, setShowSuccessFlash] = useState(false) // flash al registrar
   const [gastoInusualAlert, setGastoInusualAlert]       = useState<{ categoria: string; gastoActual: number; promedioHistorico: number } | null>(null)
   const [pendingAccountMessage, setPendingAccountMessage] = useState<string | null>(null)
   const [accountPickerOptions, setAccountPickerOptions]   = useState<{ id: string; name: string; type: string }[]>([])
   const [proactiveShown, setProactiveShown] = useState(false)
 
-  // ── ¿Es usuario nuevo? ──────────────────────────────────────
-  // Se espera a que los datos terminen de cargar antes de evaluar
-  // para evitar falsos positivos durante la carga inicial.
   const [dataLoaded, setDataLoaded] = useState(false)
   const esUsuarioNuevo = dataLoaded && transactions.length === 0
 
@@ -310,29 +356,27 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
 
   const authHeaders = useCallback(async (): Promise<Record<string, string>> => {
     const token = await getToken()
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (token) headers['Authorization'] = `Bearer ${token}`
-    return headers
+    const h: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (token) h['Authorization'] = `Bearer ${token}`
+    return h
   }, [getToken])
 
-  // ── Cargar sesiones ──
+  // ── Sesiones ──
   const fetchSessions = useCallback(async () => {
     setLoadingSessions(true)
     try {
-      const headers = await authHeaders()
-      const res  = await fetch('/api/chat-sessions', { headers })
+      const h = await authHeaders()
+      const res  = await fetch('/api/chat-sessions', { headers: h })
       const json = await res.json()
       setSessions(json.sessions ?? [])
-    } catch (e) { console.error('Error cargando sesiones:', e) }
-    finally { setLoadingSessions(false) }
+    } catch { } finally { setLoadingSessions(false) }
   }, [authHeaders])
 
-  // ── Cargar mensajes de una sesión ──
   const fetchMessages = useCallback(async (sessionId: string) => {
     setLoadingMessages(true)
     try {
-      const headers = await authHeaders()
-      const res  = await fetch(`/api/chat-sessions/${sessionId}/messages`, { headers })
+      const h = await authHeaders()
+      const res  = await fetch(`/api/chat-sessions/${sessionId}/messages`, { headers: h })
       const json = await res.json()
       const restored: Message[] = (json.messages ?? []).map((m: any) => ({
         id: m.id, text: m.content, sender: m.role === 'user' ? 'user' : 'ai',
@@ -346,51 +390,46 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
       setConversationHistory(history)
       setActiveSessionId(sessionId)
       setSidebarOpen(false)
-    } catch (e) { console.error('Error cargando mensajes:', e) }
-    finally { setLoadingMessages(false) }
+    } catch { } finally { setLoadingMessages(false) }
   }, [authHeaders])
 
-  // ── Crear sesión en DB ──
   const createSession = useCallback(async (title: string): Promise<string | null> => {
     try {
-      const headers = await authHeaders()
-      const res  = await fetch('/api/chat-sessions', { method: 'POST', headers, body: JSON.stringify({ title }) })
+      const h = await authHeaders()
+      const res  = await fetch('/api/chat-sessions', { method: 'POST', headers: h, body: JSON.stringify({ title }) })
       const json = await res.json()
       setSessions(prev => [json.session, ...prev])
       return json.session.id
-    } catch (e) { console.error('Error creando sesión:', e); return null }
+    } catch { return null }
   }, [authHeaders])
 
-  // ── Persistir mensaje ──
   const persistMessage = useCallback(async (sessionId: string, role: 'user' | 'assistant', content: string, isAuto = false) => {
     try {
-      const headers = await authHeaders()
+      const h = await authHeaders()
       await fetch(`/api/chat-sessions/${sessionId}/messages`, {
-        method: 'POST', headers, body: JSON.stringify({ role, content, is_auto: isAuto }),
+        method: 'POST', headers: h, body: JSON.stringify({ role, content, is_auto: isAuto }),
       })
       setSessions(prev =>
         prev.map(s => s.id === sessionId ? { ...s, updated_at: new Date().toISOString() } : s)
             .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
       )
-    } catch (e) { console.error('Error guardando mensaje:', e) }
+    } catch { }
   }, [authHeaders])
 
-  // ── Eliminar sesión ──
   const deleteSession = useCallback(async (sessionId: string, e: React.MouseEvent) => {
     e.stopPropagation()
     try {
-      const headers = await authHeaders()
-      await fetch('/api/chat-sessions', { method: 'DELETE', headers, body: JSON.stringify({ sessionId }) })
+      const h = await authHeaders()
+      await fetch('/api/chat-sessions', { method: 'DELETE', headers: h, body: JSON.stringify({ sessionId }) })
       setSessions(prev => prev.filter(s => s.id !== sessionId))
       if (sessionId === activeSessionId) {
         const remaining = sessions.filter(s => s.id !== sessionId)
         if (remaining.length > 0) fetchMessages(remaining[0].id)
         else startNewSession()
       }
-    } catch (e) { console.error('Error eliminando sesión:', e) }
+    } catch { }
   }, [authHeaders, activeSessionId, sessions])
 
-  // ── Nueva sesión ──
   const startNewSession = useCallback(() => {
     setActiveSessionId(null)
     setMessages([])
@@ -402,36 +441,27 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
     setSidebarOpen(false)
   }, [])
 
-  // ── Sidebar: cargar sesiones al abrir ──
-  useEffect(() => {
-    if (sidebarOpen) fetchSessions()
-  }, [sidebarOpen])
+  useEffect(() => { if (sidebarOpen) fetchSessions() }, [sidebarOpen])
 
-  // ── Cargar onboarding ──
+  // ── Cargar usuario, onboarding y streak ──
   useEffect(() => {
-    const loadOnboarding = async () => {
+    const load = async () => {
       const { data: { user } } = await supabase.auth.getUser()
       const uid = user?.id
       if (!uid) return
+      setUserId(uid)
+      setStreak(getStreak(uid))
       const stored = localStorage.getItem(`ai_wallet_onboarding_${uid}`)
-      if (stored) {
-        try { setOnboarding(JSON.parse(stored)) } catch { }
-      }
+      if (stored) { try { setOnboarding(JSON.parse(stored)) } catch { } }
     }
-    loadOnboarding()
+    load()
   }, [])
 
-  // ── Marcar datos como cargados ──
-  // Se activa cuando transactions cambia por primera vez después de montar.
-  useEffect(() => {
-    if (transactions !== undefined) setDataLoaded(true)
-  }, [transactions])
+  useEffect(() => { if (transactions !== undefined) setDataLoaded(true) }, [transactions])
 
   // ── Resumen semanal ──
   useEffect(() => {
     if (!transactions?.length || weeklySummaryInjected.current) return
-    const uid = onboarding ? 'loaded' : null
-    if (!uid) return
     if (!weeklySummary.shouldShow('user')) return
     const summaryData = weeklySummary.buildSummary(transactions, budgets, goals)
     if (!summaryData) return
@@ -448,33 +478,24 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
     setCtx(buildFinancialContext(transactions, budgets, goals, ob, selectedMonth))
   }, [transactions?.length, budgets?.length, goals?.length, selectedMonth, onboarding])
 
-  // ── Mensaje proactivo al abrir ──────────────────────────────
-  // Una sola vez por sesión, solo si el chat está vacío y el usuario tiene datos.
+  // ── Mensaje proactivo ──
   useEffect(() => {
-    if (!ctx || !dataLoaded) return
-    if (messages.length > 0) return
-    if (proactiveShown) return
-    if (esUsuarioNuevo) return
-    if (new Date().getDay() === 1 && transactions.length > 0) return  // lunes lo cubre el weekly
-
+    if (!ctx || !dataLoaded || messages.length > 0 || proactiveShown || esUsuarioNuevo) return
+    if (new Date().getDay() === 1 && transactions.length > 0) return
     const proactivo = getProactiveMessage(ctx, onboarding)
     if (!proactivo) return
-
     const timer = setTimeout(() => {
       setMessages(prev => {
         if (prev.length > 0) return prev
         return [{ id: `proactive-${Date.now()}`, text: proactivo, sender: 'ai', timestamp: new Date(), isAuto: true }]
       })
       setProactiveShown(true)
-    }, 600)
-
+    }, 400)
     return () => clearTimeout(timer)
   }, [ctx, dataLoaded, messages.length, proactiveShown, esUsuarioNuevo])
 
   // ── Scroll ──
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
   // ── Contexto backend ──
   const buildBackendContext = useCallback(() => {
@@ -501,7 +522,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
         transactions.filter(t => t.type === 'gasto' && t.category === cat && (t.transaction_date || '').startsWith(selectedMonth)).reduce((s, t) => s + Number(t.amount), 0),
     }))
     const gastoMinimoMensual = categoriasClasificadas.filter(c => c.tipo === 'esencial').reduce((s, c) => s + c.promedio_mensual, 0)
-
     return {
       nombre_usuario: onboarding.nombre || null,
       medio_pago_habitual: null,
@@ -522,8 +542,8 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
     }
   }, [ctx, selectedMonth, transactions, onboarding, esUsuarioNuevo])
 
-  const addMessage = useCallback((text: string, sender: 'user' | 'ai', isAuto = false): Message => {
-    const msg: Message = { id: `${Date.now()}-${Math.random()}`, text, sender, timestamp: new Date(), isAuto }
+  const addMessage = useCallback((text: string, sender: 'user' | 'ai', isAuto = false, type: Message['type'] = 'normal'): Message => {
+    const msg: Message = { id: `${Date.now()}-${Math.random()}`, text, sender, timestamp: new Date(), isAuto, type }
     setMessages(prev => [...prev, msg])
     return msg
   }, [])
@@ -537,7 +557,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
     setPendingAccountMessage(null)
     setAccountPickerOptions([])
 
-    // Crear sesión en DB lazy
     let sessionId = activeSessionId
     if (!sessionId) {
       sessionId = await createSession(message.slice(0, 80))
@@ -548,7 +567,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
     try {
       const intent = detectIntent(message)
 
-      // Auto-respuesta SOLO si el usuario ya tiene datos (no usuario nuevo)
       if (intent === 'consulta_simple' && ctx && !overrideAccountId && !esUsuarioNuevo) {
         const auto = autoRespond(message, ctx)
         if (auto) {
@@ -556,7 +574,7 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
             addMessage(auto, 'ai', true)
             if (sessionId) await persistMessage(sessionId, 'assistant', auto, true)
             setIsLoading(false)
-          }, 250)
+          }, 200)
           return
         }
       }
@@ -584,8 +602,19 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
       }
 
       const aiText = data.mensaje_respuesta || 'No pude procesar tu mensaje'
-      addMessage(aiText, 'ai')
+      const msgType: Message['type'] = data.action === 'INSERT_TRANSACTION' ? 'success' : 'normal'
+      addMessage(aiText, 'ai', false, msgType)
       if (sessionId) await persistMessage(sessionId, 'assistant', aiText)
+
+      // Flash de éxito + streak al registrar
+      if (data.action === 'INSERT_TRANSACTION') {
+        setShowSuccessFlash(true)
+        setTimeout(() => setShowSuccessFlash(false), 1800)
+        if (userId) {
+          const newStreak = bumpStreak(userId)
+          setStreak(newStreak)
+        }
+      }
 
       // Gasto inusual
       if (data.action === 'INSERT_TRANSACTION' && data.data?.type === 'gasto') {
@@ -618,17 +647,24 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
   }
 
   const handleSubmit = () => {
-    if (inputValue.trim()) {
-      handleSendMessage(inputValue.trim())
-      setInputValue('')
-    }
+    if (inputValue.trim()) { handleSendMessage(inputValue.trim()); setInputValue('') }
   }
 
-  const chips   = getChips(ctx, esUsuarioNuevo)
-  const welcome = getWelcome(ctx, esUsuarioNuevo, onboarding.nombre)
+  const quickActions = getQuickActions(ctx, esUsuarioNuevo)
+  const welcome      = getWelcome(ctx, esUsuarioNuevo, onboarding.nombre, streak)
+  const showQuickActions = messages.length === 0 || (messages.length > 0 && messages[messages.length - 1].sender === 'ai')
 
   return (
     <div className="flex flex-col h-[calc(100vh-160px)] min-h-[500px] bg-[#0A0F0D] relative">
+
+      {/* ── Flash de registro exitoso ── */}
+      {showSuccessFlash && (
+        <div className="absolute inset-0 pointer-events-none z-50 flex items-center justify-center">
+          <div className="flex items-center gap-2 bg-[#00C853] text-black text-sm font-bold px-5 py-2.5 rounded-full shadow-lg animate-bounce">
+            <CheckCircle2 size={16} /> Guardado
+          </div>
+        </div>
+      )}
 
       {/* ── Sidebar ── */}
       {sidebarOpen && (
@@ -640,9 +676,7 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
                 <p className="text-white font-semibold text-sm">Historial</p>
                 <p className="text-white/30 text-xs">{sessions.length} conversaciones</p>
               </div>
-              <button onClick={() => setSidebarOpen(false)} className="text-white/30 hover:text-white/60 transition-colors">
-                <X size={18} />
-              </button>
+              <button onClick={() => setSidebarOpen(false)} className="text-white/30 hover:text-white/60 transition-colors"><X size={18} /></button>
             </div>
             <div className="px-3 py-2.5 border-b border-white/5">
               <button onClick={startNewSession} className="w-full flex items-center justify-center gap-2 text-sm text-[#69F0AE] border border-[#00C853]/30 rounded-xl py-2 hover:bg-[#00C853]/10 transition-colors">
@@ -651,7 +685,7 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
             </div>
             <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
               {loadingSessions && <div className="flex justify-center py-8"><div className="w-4 h-4 border-2 border-white/10 border-t-[#00C853] rounded-full animate-spin" /></div>}
-              {!loadingSessions && sessions.length === 0 && <p className="text-white/20 text-xs text-center py-8">No hay conversaciones guardadas</p>}
+              {!loadingSessions && sessions.length === 0 && <p className="text-white/20 text-xs text-center py-8">Sin conversaciones</p>}
               {!loadingSessions && sessions.map(session => (
                 <div key={session.id} onClick={() => fetchMessages(session.id)}
                   className={`group flex items-start gap-2 px-3 py-2.5 rounded-xl cursor-pointer transition-all ${session.id === activeSessionId ? 'bg-[#00C853]/10 border border-[#00C853]/20' : 'hover:bg-white/5 border border-transparent'}`}
@@ -660,9 +694,7 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
                     <p className={`text-sm leading-snug truncate ${session.id === activeSessionId ? 'text-[#69F0AE]' : 'text-white/70'}`}>{session.title}</p>
                     <p className="text-[10px] text-white/25 mt-0.5">{formatSessionDate(session.updated_at)}</p>
                   </div>
-                  <button onClick={(e) => deleteSession(session.id, e)} className="shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 text-white/20 hover:text-[#FF5252] transition-all">
-                    <X size={13} />
-                  </button>
+                  <button onClick={(e) => deleteSession(session.id, e)} className="shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 text-white/20 hover:text-[#FF5252] transition-all"><X size={13} /></button>
                 </div>
               ))}
             </div>
@@ -673,41 +705,39 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
       {/* ── Header ── */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-white/5 flex-shrink-0">
         <div className="flex items-center gap-3">
-          <button onClick={() => setSidebarOpen(true)} className="text-white/30 hover:text-white/60 transition-colors p-1" title="Historial">
+          <button onClick={() => setSidebarOpen(true)} className="text-white/30 hover:text-white/60 transition-colors p-1">
             <History size={18} />
           </button>
           <div className="w-9 h-9 bg-[#00C853]/20 rounded-full flex items-center justify-center text-lg">🤖</div>
           <div>
             <p className="text-white font-semibold text-sm">Tu Coach</p>
-            <p className="text-white/40 text-xs">
-              {esUsuarioNuevo ? 'Empecemos juntos' : 'Financiero personal'}
-            </p>
+            <p className="text-white/40 text-xs">{esUsuarioNuevo ? 'Empecemos' : 'Financiero personal'}</p>
           </div>
         </div>
-        {ctx && !esUsuarioNuevo && (
-          <div className="flex items-center gap-2">
-            <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border ${
+
+        <div className="flex items-center gap-2">
+          {/* Streak badge — solo si tiene más de 1 día */}
+          {streak > 1 && (
+            <div className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#FF6D00]/15 border border-[#FF6D00]/20">
+              <Flame size={11} className="text-[#FF6D00]" />
+              <span className="text-[#FF6D00] text-[11px] font-semibold">{streak}</span>
+            </div>
+          )}
+          {ctx && !esUsuarioNuevo && (
+            <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
               ctx.estado === 'bien'    ? 'bg-green-500/10 text-green-400 border-green-500/20' :
               ctx.estado === 'cuidado' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' :
                                          'bg-red-500/10 text-red-400 border-red-500/20'
             }`}>
-              {ctx.estado === 'bien' ? '🟢 Vas bien' : ctx.estado === 'cuidado' ? '🟡 Cuidado' : '🔴 Complicado'}
+              {ctx.estado === 'bien' ? '🟢' : ctx.estado === 'cuidado' ? '🟡' : '🔴'}
+              {ctx.estado === 'bien' ? 'Bien' : ctx.estado === 'cuidado' ? 'Cuidado' : 'Mal'}
             </div>
-            <button onClick={startNewSession} className="text-white/20 hover:text-white/40 transition-colors" title="Nueva conversación">
-              <Plus size={14} />
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Alerta activa (solo si hay datos) */}
-      {ctx && !esUsuarioNuevo && ctx.alertas.length > 0 && messages.length === 0 && (
-        <div className="mx-4 mt-3 flex-shrink-0">
-          <div className="bg-yellow-500/5 border border-yellow-500/20 rounded-xl px-3 py-2">
-            <p className="text-yellow-400/80 text-xs">⚠️ {ctx.alertas[0]}</p>
-          </div>
+          )}
+          <button onClick={startNewSession} className="text-white/20 hover:text-white/40 transition-colors p-1">
+            <Plus size={14} />
+          </button>
         </div>
-      )}
+      </div>
 
       {/* ── Mensajes ── */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
@@ -720,22 +750,11 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
         {!loadingMessages && messages.length === 0 && (
           <>
             <BotMessage text={welcome} />
-
-            {/* Mini dashboard: solo para usuarios con datos */}
             {!esUsuarioNuevo && ctx && ctx.totalGastado > 0 && (
               <div className="ml-10 grid grid-cols-3 gap-2">
-                <MiniCard label="Gastado"    value={`$${Math.round(ctx.totalGastado).toLocaleString('es-AR')}`} />
-                <MiniCard label="Disponible" value={`$${Math.round(ctx.dineroLibre).toLocaleString('es-AR')}`} highlight={ctx.dineroLibre > 0 ? 'green' : 'red'} />
-                <MiniCard label="Por día"    value={`$${Math.round(ctx.gastoDiarioRecomendado).toLocaleString('es-AR')}`} />
-              </div>
-            )}
-
-            {/* Pasos de onboarding para usuario nuevo */}
-            {esUsuarioNuevo && (
-              <div className="ml-10 space-y-2">
-                <OnboardingStep number={1} text="Contame tu último gasto" active />
-                <OnboardingStep number={2} text="Lo registro automáticamente" />
-                <OnboardingStep number={3} text="Te muestro cómo vas" />
+                <MiniCard label="Gastado" value={`$${Math.round(ctx.totalGastado).toLocaleString('es-AR')}`} />
+                <MiniCard label="Libre" value={`$${Math.round(ctx.dineroLibre).toLocaleString('es-AR')}`} highlight={ctx.dineroLibre > 0 ? 'green' : 'red'} />
+                <MiniCard label="Por día" value={`$${Math.round(ctx.gastoDiarioRecomendado).toLocaleString('es-AR')}`} />
               </div>
             )}
           </>
@@ -752,9 +771,17 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
             ) : (
               <>
                 <div className="flex gap-2 items-end">
-                  <div className="w-8 h-8 bg-[#00C853]/20 rounded-full flex items-center justify-center text-sm flex-shrink-0">🤖</div>
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm flex-shrink-0 ${
+                    msg.type === 'success' ? 'bg-[#00C853]/30' : 'bg-[#00C853]/20'
+                  }`}>
+                    {msg.type === 'success' ? '✅' : '🤖'}
+                  </div>
                   <div className="max-w-[85%]">
-                    <div className="bg-[#141A17] border border-white/5 rounded-2xl rounded-bl-sm px-4 py-3">
+                    <div className={`rounded-2xl rounded-bl-sm px-4 py-3 ${
+                      msg.type === 'success'
+                        ? 'bg-[#00C853]/10 border border-[#00C853]/25'
+                        : 'bg-[#141A17] border border-white/5'
+                    }`}>
                       <p className="text-white text-sm leading-relaxed">{msg.text}</p>
                     </div>
                     {msg.isAuto && <p className="text-white/20 text-[10px] mt-0.5 ml-1">respuesta instantánea</p>}
@@ -806,20 +833,26 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
         </div>
       )}
 
-      {/* Chips */}
-      {accountPickerOptions.length === 0 && (
-        <div className="px-4 pb-2 flex gap-2 overflow-x-auto flex-shrink-0 scrollbar-none">
-          {chips.map(chip => (
-            <button key={chip} onClick={() => handleSendMessage(chip)} disabled={isLoading}
-              className="flex-shrink-0 text-xs bg-[#141A17] border border-white/10 rounded-full px-3 py-1.5 text-white/60 hover:border-[#00C853]/40 hover:text-white transition-colors disabled:opacity-30"
-            >
-              {chip}
-            </button>
-          ))}
+      {/* ── Quick Actions (cards) — reemplazan los chips de texto ── */}
+      {accountPickerOptions.length === 0 && showQuickActions && quickActions.length > 0 && (
+        <div className="px-4 pb-2 flex-shrink-0">
+          <div className="flex gap-2 overflow-x-auto scrollbar-none">
+            {quickActions.map(action => (
+              <button
+                key={action.id}
+                onClick={() => handleSendMessage(action.message)}
+                disabled={isLoading}
+                className={`flex-shrink-0 flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition-all active:scale-95 disabled:opacity-30 ${action.color}`}
+              >
+                <span className="text-base leading-none">{action.emoji}</span>
+                <span className="text-white/70">{action.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
-      {/* Input */}
+      {/* ── Input ── */}
       <div className="p-4 border-t border-white/5 flex-shrink-0">
         <div className="flex gap-2">
           <input
@@ -827,11 +860,13 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
             value={inputValue}
             onChange={e => setInputValue(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') handleSubmit() }}
-            placeholder={esUsuarioNuevo ? '¿Qué fue lo último que gastaste?' : 'Contame qué gastaste...'}
-            className="flex-1 bg-[#141A17] border border-white/10 rounded-xl px-4 py-3 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#00C853]/40 transition-colors"
+            placeholder={esUsuarioNuevo ? '¿Cuál fue tu último gasto?' : 'Escribí un gasto o una pregunta...'}
+            className="flex-1 bg-[#141A17] border border-white/10 rounded-xl px-4 py-3 text-white text-sm placeholder-white/25 focus:outline-none focus:border-[#00C853]/40 transition-colors"
           />
-          <button onClick={handleSubmit} disabled={isLoading || !inputValue.trim()}
-            className="bg-[#00C853] hover:bg-[#00C853]/80 disabled:opacity-30 text-black font-bold px-4 py-3 rounded-xl transition-colors"
+          <button
+            onClick={handleSubmit}
+            disabled={isLoading || !inputValue.trim()}
+            className="bg-[#00C853] hover:bg-[#00C853]/80 disabled:opacity-30 text-black font-bold px-4 py-3 rounded-xl transition-all active:scale-95"
           >
             →
           </button>
@@ -841,7 +876,7 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
   )
 }
 
-// ─── Sub-componentes ─────────────────────────────────────────
+// ─── Sub-componentes ──────────────────────────────────────────
 function BotMessage({ text }: { text: string }) {
   return (
     <div className="flex gap-2 items-end">
@@ -862,17 +897,6 @@ function MiniCard({ label, value, highlight }: { label: string; value: string; h
   )
 }
 
-function OnboardingStep({ number, text, active = false }: { number: number; text: string; active?: boolean }) {
-  return (
-    <div className={`flex items-center gap-2.5 transition-opacity ${active ? 'opacity-100' : 'opacity-30'}`}>
-      <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${active ? 'bg-[#00C853] text-black' : 'bg-white/10 text-white/40'}`}>
-        {number}
-      </div>
-      <p className={`text-xs ${active ? 'text-white/70' : 'text-white/30'}`}>{text}</p>
-    </div>
-  )
-}
-
 function GastoInusualAlert({ categoria, gastoActual, promedioHistorico, onVerDetalle }: { categoria: string; gastoActual: number; promedioHistorico: number; onVerDetalle: () => void }) {
   const veces = promedioHistorico > 0 ? (gastoActual / promedioHistorico).toFixed(1) : '2+'
   const fmt   = (n: number) => `$${Math.round(n).toLocaleString('es-AR')}`
@@ -883,7 +907,7 @@ function GastoInusualAlert({ categoria, gastoActual, promedioHistorico, onVerDet
           <span className="text-yellow-400 text-sm mt-0.5">⚠️</span>
           <div className="flex-1 min-w-0">
             <p className="text-yellow-400/90 text-xs font-medium">Gasto inusual en {categoria}</p>
-            <p className="text-yellow-400/60 text-xs mt-0.5">Este gasto es {veces}x tu promedio histórico ({fmt(promedioHistorico)}/mes)</p>
+            <p className="text-yellow-400/60 text-xs mt-0.5">Es {veces}x tu promedio ({fmt(promedioHistorico)}/mes)</p>
           </div>
         </div>
         <button onClick={onVerDetalle} className="mt-2 w-full text-xs text-yellow-400/70 hover:text-yellow-400 border border-yellow-500/20 hover:border-yellow-500/40 rounded-lg py-1.5 transition-colors">
