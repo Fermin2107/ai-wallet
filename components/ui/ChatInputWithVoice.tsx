@@ -155,7 +155,7 @@ export default function ChatInputWithVoice({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = (e: React.SyntheticEvent) => {
     e.preventDefault();
     if (message.trim() && !disabled && !isLoading) {
       onSendMessage(message.trim());
@@ -166,7 +166,7 @@ export default function ChatInputWithVoice({
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSubmit(e as any);
+      handleSubmit(e);
     }
   };
 

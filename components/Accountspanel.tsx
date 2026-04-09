@@ -392,8 +392,8 @@ export default function AccountsPanel({ onNavigateToChat }: AccountsPanelProps) 
       name:         data.name,
       type:         data.type,
       balance:      data.balance,
-      credit_limit: (data as any).credit_limit ?? null,
-      is_default:   (data as any).is_default ?? false,
+      credit_limit: data.credit_limit ?? null,
+      is_default:   data.is_default ?? false,
       currency:     'ARS',
     } as SimpleAccount;
   };

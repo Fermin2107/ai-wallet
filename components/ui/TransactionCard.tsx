@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Transaction, Categoria } from '../../lib/types';
+import { Transaction } from '../../lib/types';
 
 interface TransactionCardProps {
   transaction: Transaction;

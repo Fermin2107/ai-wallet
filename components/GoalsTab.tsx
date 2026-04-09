@@ -79,7 +79,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 const inputClass = "w-full bg-white/5 border border-white/10 rounded-xl px-3 py-3 text-white text-sm placeholder-white/20 focus:outline-none focus:border-[#00C853]/40";
 
-export default function GoalsTab({ selectedMonth, refreshTrigger, onNavigateToChat }: GoalsTabProps) {
+export default function GoalsTab({ selectedMonth: _selectedMonth, refreshTrigger, onNavigateToChat }: GoalsTabProps) {
   const { goals, loading, refresh, updateGoal, createGoal } = useSimpleSupabase();
 
   const [onboarding, setOnboarding]   = useState({ ingreso_mensual: 0, objetivo_ahorro: 0 });

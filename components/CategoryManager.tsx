@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useSimpleSupabase } from '../hooks/useSimpleSupabase'
+import type { SimpleTransaction, SimpleBudget, SimpleGoal } from '../hooks/useSimpleSupabase'
 import { createBrowserClient } from '@supabase/ssr'
 import {
   buildFinancialContext,
@@ -92,7 +93,7 @@ export default function ChatTab({ selectedMonth, onDataChanged }: ChatTabProps) 
       localStorage.getItem('ai_wallet_onboarding') || '{}'
     )
 
-    const rawTx: RawTransaction[] = transactions.map((t: any) => ({
+    const rawTx: RawTransaction[] = transactions.map((t: SimpleTransaction) => ({
       id: t.id,
       amount: t.amount,
       type: t.type,
@@ -101,14 +102,14 @@ export default function ChatTab({ selectedMonth, onDataChanged }: ChatTabProps) 
       description: t.description
     }))
 
-    const rawBudgets: RawBudget[] = budgets.map((b: any) => ({
+    const rawBudgets: RawBudget[] = budgets.map((b: SimpleBudget) => ({
       id: b.id,
       category: b.category,
       limit_amount: b.limit_amount,
       month_period: b.month_period
     }))
 
-    const rawGoals: RawGoal[] = goals.map((g: any) => ({
+    const rawGoals: RawGoal[] = goals.map((g: SimpleGoal) => ({
       id: g.id,
       name: g.name,
       target_amount: g.target_amount,

@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { Transaction } from '../../lib/types';
-import { TrendingUp, TrendingDown, DollarSign, Wallet } from 'lucide-react';
+import { TrendingUp, TrendingDown, Wallet } from 'lucide-react';
 
 interface DashboardCardsProps {
   transactions: Transaction[];

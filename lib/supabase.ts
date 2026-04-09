@@ -94,7 +94,7 @@ export class SupabaseError extends Error {
   constructor(
     message: string,
     public code?: string,
-    public details?: any
+    public details?: unknown
   ) {
     super(message);
     this.name = 'SupabaseError';
@@ -102,25 +102,26 @@ export class SupabaseError extends Error {
 }
 
 // Función utilitaria para manejar errores de Supabase
-export const handleSupabaseError = (error: any): SupabaseError => {
+export const handleSupabaseError = (error: unknown): SupabaseError => {
+  const e = error as { code?: string; message?: string; details?: unknown };
   console.error('Error de Supabase:', error);
-  
-  if (error.code) {
-    switch (error.code) {
+
+  if (e.code) {
+    switch (e.code) {
       case '23505':
-        return new SupabaseError('Registro duplicado', error.code, error.details);
+        return new SupabaseError('Registro duplicado', e.code, e.details);
       case '23503':
-        return new SupabaseError('Violación de clave foránea', error.code, error.details);
+        return new SupabaseError('Violación de clave foránea', e.code, e.details);
       case '23514':
-        return new SupabaseError('Violación de constraint', error.code, error.details);
+        return new SupabaseError('Violación de constraint', e.code, e.details);
       case 'PGRST116':
-        return new SupabaseError('Registro no encontrado', error.code, error.details);
+        return new SupabaseError('Registro no encontrado', e.code, e.details);
       default:
-        return new SupabaseError(error.message || 'Error desconocido de Supabase', error.code, error.details);
+        return new SupabaseError(e.message || 'Error desconocido de Supabase', e.code, e.details);
     }
   }
-  
-  return new SupabaseError(error.message || 'Error desconocido de Supabase');
+
+  return new SupabaseError(e.message || 'Error desconocido de Supabase');
 };
 
 // Exportaciones por defecto

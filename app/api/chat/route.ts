@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
-import { ChatRequest, ChatResponse } from '../../../lib/types';
+import { ChatResponse } from '../../../lib/types';
 import {
   createSupabaseServerClient,
   createSupabaseServerClientWithToken,

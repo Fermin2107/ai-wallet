@@ -5,7 +5,7 @@ import { History, X, Plus, Flame, CheckCircle2 } from 'lucide-react'
 import { useSimpleSupabase } from '../hooks/useSimpleSupabase'
 import { createBrowserClient } from '@supabase/ssr'
 import { useWeeklySummary } from '../hooks/useWeeklySummary'
-import { useDailyCoachMessage } from '../hooks/useDailyCoachMessage'
+import { useDailyCoachMessage } from '../hooks/UseDailyCoachMessage'
 import WeeklySummaryCard from '../components/WeeklySummaryCard'
 
 // ─── Tipos ───────────────────────────────────────────────────
@@ -824,7 +824,7 @@ function getQuickActions(
 // Mantener para compatibilidad — el daily hook lo reemplaza
 function getProactiveMessage(
   ctx: ReturnType<typeof buildFinancialContext>,
-  onboarding: { nombre?: string }
+  _onboarding: { nombre?: string }
 ): string | null {
   const hora = new Date().getHours()
   const dia = new Date().getDate()

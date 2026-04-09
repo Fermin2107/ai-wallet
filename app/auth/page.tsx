@@ -39,15 +39,16 @@ export default function AuthPage() {
           setError('Revisá tu email para confirmar la cuenta.')
         }
       }
-    } catch (err: any) {
-      if (err.message?.includes('Invalid login credentials')) {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : ''
+      if (msg.includes('Invalid login credentials')) {
         setError('Email o contraseña incorrectos')
-      } else if (err.message?.includes('User already registered')) {
+      } else if (msg.includes('User already registered')) {
         setError('Este email ya está registrado. Ingresá en vez de registrarte.')
-      } else if (err.message?.includes('Password should be')) {
+      } else if (msg.includes('Password should be')) {
         setError('La contraseña debe tener al menos 6 caracteres')
       } else {
-        setError(err.message || 'Ocurrió un error, intentá de nuevo')
+        setError(msg || 'Ocurrió un error, intentá de nuevo')
       }
     } finally {
       setLoading(false)

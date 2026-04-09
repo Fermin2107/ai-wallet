@@ -83,7 +83,7 @@ export class RealAIProcessor {
 
       return result;
 
-    } catch (error) {
+    } catch (_error) {
       
       // Fallback a procesamiento básico
       return {

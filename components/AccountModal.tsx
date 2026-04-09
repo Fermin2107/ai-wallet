@@ -25,12 +25,6 @@ interface AccountModalProps {
 
 // ─── Formateo de moneda en tiempo real ───────────────────────────────────────
 
-function formatDisplayAmount(raw: string): string {
-  const digits = raw.replace(/\D/g, '');
-  if (!digits) return '';
-  return Number(digits).toLocaleString('es-AR');
-}
-
 function parseAmount(display: string): number {
   return Number(display.replace(/\./g, '').replace(',', '.')) || 0;
 }

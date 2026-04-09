@@ -244,7 +244,7 @@ export class NLPProcessor {
     return null;
   }
 
-  categorizeTransaction(description: string, amount: number, type: 'income' | 'expense'): { category: string; essential: boolean; confidence: number } {
+  categorizeTransaction(description: string, _amount: number, _type: 'income' | 'expense'): { category: string; essential: boolean; confidence: number } {
     const normalizedDesc = this.normalizeText(description);
     
     let bestMatch = { category: 'otros', essential: false, confidence: 0 };
@@ -275,8 +275,6 @@ export class NLPProcessor {
   }
 
   processMessage(text: string): { transaction?: Partial<Transaction>; response: string; confidence: number } {
-    const normalizedText = this.normalizeText(text);
-    
     for (const pattern of this.patterns) {
       const match = text.match(pattern.regex);
       if (match) {
@@ -307,7 +305,7 @@ export class NLPProcessor {
             response,
             confidence: categorization.confidence
           };
-        } catch (error) {
+        } catch (_error) {
           continue;
         }
       }
@@ -366,7 +364,7 @@ export class NLPProcessor {
     }
   }
 
-  private generateHelpResponse(text: string): string {
+  private generateHelpResponse(_text: string): string {
     const suggestions = [
       'Intenta decir algo como: "Gasté $500 en supermercado"',
       'Podrías decir: "Me compré ropa por $200"',

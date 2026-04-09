@@ -1,8 +1,9 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { DollarSign, Edit2, Check, X, AlertTriangle, Lightbulb } from 'lucide-react';
+import { DollarSign, Edit2, X, AlertTriangle, Lightbulb } from 'lucide-react';
 import { useSimpleSupabase } from '../hooks/useSimpleSupabase';
+import type { SimpleBudget } from '../hooks/useSimpleSupabase';
 import { useSimpleAdaptedData } from '../hooks/useSimpleAdaptedData';
 import { formatCategoria } from '../lib/types';
 import { supabase } from '../lib/supabase';
@@ -104,7 +105,7 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
   const budgetsSinOtros = filteredBudgets.filter(b => b.category !== 'otros')
   const budgetOtros     = filteredBudgets.find(b => b.category === 'otros')
 
-  const getSpent = (budget: any) => {
+  const getSpent = (budget: SimpleBudget) => {
     if (!transactions) return 0
     return transactions
       .filter(t => {
@@ -198,7 +199,7 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
   }
 
   // ─── Render de una tarjeta de budget ─────────────────────
-  const renderBudgetCard = (budget: any, isOtros = false) => {
+  const renderBudgetCard = (budget: SimpleBudget, isOtros = false) => {
     const spent      = getSpent(budget)
     const remaining  = budget.limit_amount - spent
     const pct        = budget.limit_amount > 0 ? (spent / budget.limit_amount) * 100 : 0
@@ -356,7 +357,7 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
               <Lightbulb size={15} className="text-amber-400 shrink-0 mt-0.5" />
               <div>
                 <p className="text-amber-400/90 text-sm font-medium">
-                  Tenés mucho gasto en "Otros" ({Math.round(pctDeTotal * 100)}% de lo gastado)
+                  Tenés mucho gasto en &quot;Otros&quot; ({Math.round(pctDeTotal * 100)}% de lo gastado)
                 </p>
                 <p className="text-amber-400/50 text-xs mt-0.5">
                   Organizarlo en categorías te va a ayudar a entender mejor en qué se va tu plata.

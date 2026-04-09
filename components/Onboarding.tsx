@@ -426,7 +426,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
             </div>
             {/* Nota sobre 'otros' */}
             <p className="text-white/25 text-xs text-center">
-              📦 "Otros" se agrega automáticamente para gastos varios
+              📦 &quot;Otros&quot; se agrega automáticamente para gastos varios
             </p>
             <NavButtons
               onBack={() => setStep(2)}
