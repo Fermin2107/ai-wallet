@@ -1,12 +1,16 @@
 'use client'
 
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import { History, X, Plus, Flame, CheckCircle2 } from 'lucide-react'
+import { History, X, Plus, CheckCircle2 } from 'lucide-react'
 import { useSimpleSupabase } from '../hooks/useSimpleSupabase'
 import { createBrowserClient } from '@supabase/ssr'
 import { useWeeklySummary } from '../hooks/useWeeklySummary'
 import { useDailyCoachMessage } from '../hooks/UseDailyCoachMessage'
+import { useCoachProfile } from '../hooks/useCoachProfile'
+import { useStreak } from '../hooks/useStreak'
 import WeeklySummaryCard from '../components/WeeklySummaryCard'
+import ChatUICard from './ChatUICard'
+import StreakBadge from './StreakBadge'
 
 // ─── Tipos ───────────────────────────────────────────────────
 interface ChatTabProps {
@@ -22,6 +26,7 @@ interface Message {
   timestamp: Date
   isAuto?: boolean
   type?: 'normal' | 'success' | 'alert' | 'insight'
+  ui?: { type: string; data: Record<string, unknown> }
 }
 
 interface ChatSession {
@@ -77,49 +82,6 @@ function getCoachState(
 
   // día 21+
   return ctx.vaALlegar ? 'fin_mes_bien' : 'fin_mes_mal'
-}
-
-// ─── Streak helper ───────────────────────────────────────────
-function getStreak(userId: string): number {
-  try {
-    const raw = localStorage.getItem(`ai_wallet_streak_${userId}`)
-    if (!raw) return 0
-    const { lastDate, count } = JSON.parse(raw) as {
-      lastDate: string
-      count: number
-    }
-    const hoy = new Date().toISOString().split('T')[0]
-    const ayer = new Date(Date.now() - 86400000).toISOString().split('T')[0]
-    if (lastDate === hoy) return count
-    if (lastDate === ayer) return count
-    return 0
-  } catch {
-    return 0
-  }
-}
-
-function bumpStreak(userId: string): number {
-  try {
-    const hoy = new Date().toISOString().split('T')[0]
-    const raw = localStorage.getItem(`ai_wallet_streak_${userId}`)
-    let count = 1
-    if (raw) {
-      const { lastDate, count: prev } = JSON.parse(raw) as {
-        lastDate: string
-        count: number
-      }
-      const ayer = new Date(Date.now() - 86400000).toISOString().split('T')[0]
-      if (lastDate === hoy) return prev
-      if (lastDate === ayer) count = prev + 1
-    }
-    localStorage.setItem(
-      `ai_wallet_streak_${userId}`,
-      JSON.stringify({ lastDate: hoy, count })
-    )
-    return count
-  } catch {
-    return 1
-  }
 }
 
 // ─── Motor financiero ─────────────────────────────────────────
@@ -331,6 +293,55 @@ function buildFinancialContext(
   }
 }
 
+// ─── enrichUIData ─────────────────────────────────────────────
+// Solo mapea valores ya calculados en buildFinancialContext al
+// formato que cada ChatUICard espera. No calcula nada nuevo.
+function enrichUIData(
+  type: string,
+  ctx: ReturnType<typeof buildFinancialContext>,
+  actionData?: Record<string, unknown>
+): Record<string, unknown> {
+  switch (type) {
+    case 'progress_bar':
+      return {
+        gastado: ctx.totalGastado,
+        ingreso: ctx.ingresoEfectivo,
+        libre: ctx.dineroLibre,
+        objetivo_ahorro: ctx.objetivoAhorro,
+        dias_restantes: ctx.diasRestantes,
+        va_a_llegar: ctx.vaALlegar,
+        estado: ctx.estado,
+      }
+    case 'category_chips':
+      return {
+        categorias: ctx.topGastos,
+        total: ctx.totalGastado,
+      }
+    case 'goal_card':
+      return {
+        metas: ctx.goalAnalysis,
+      }
+    case 'budget_alert':
+      return {
+        budgets: ctx.budgetAnalysis.filter((b) => b.percentUsed >= 60),
+      }
+    case 'daily_limit':
+      return {
+        recomendado: ctx.gastoDiarioRecomendado,
+        real: ctx.gastoDiarioPromedio,
+        dias_restantes: ctx.diasRestantes,
+      }
+    case 'plan_mensual':
+      return {
+        ...(actionData ?? {}),
+        libre: ctx.dineroLibre,
+        ingreso: ctx.ingresoEfectivo,
+      }
+    default:
+      return {}
+  }
+}
+
 // ─── Intent ──────────────────────────────────────────────────
 type Intent = 'registro' | 'consulta_simple' | 'complejo'
 
@@ -434,6 +445,27 @@ function autoRespond(
   }
 
   return null
+}
+
+// ─── extractAndUpdateProfile ─────────────────────────────────
+async function extractAndUpdateProfile(
+  message: string,
+  updateProfile: (extract: import('../hooks/useCoachProfile').ProfileExtract) => Promise<void>
+): Promise<void> {
+  try {
+    const response = await fetch('/api/extract-profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+    })
+    if (!response.ok) return
+    const data = await response.json()
+    if (data && typeof data === 'object') {
+      await updateProfile(data)
+    }
+  } catch {
+    // Silenciar — nunca rompe la experiencia principal
+  }
 }
 
 // ─── getWelcome ───────────────────────────────────────────────
@@ -934,7 +966,13 @@ export default function ChatTab({
     objetivo_ahorro?: number
   }>({})
   const [userId, setUserId] = useState<string | null>(null)
-  const [streak, setStreak] = useState(0)
+  const {
+    streak: streakData,
+    justReachedMilestone,
+    clearMilestone,
+    bumpStreak,
+  } = useStreak()
+  const streakCount = streakData.currentStreak
   const [showSuccessFlash, setShowSuccessFlash] = useState(false)
   const [gastoInusualAlert, setGastoInusualAlert] = useState<{
     categoria: string
@@ -964,6 +1002,7 @@ export default function ChatTab({
   const weeklySummaryInjected = useRef(false)
   const { shouldShowDaily, buildDailyMessage, markDailyShown } =
     useDailyCoachMessage()
+  const { updateProfile, buildProfileContext } = useCoachProfile()
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -1153,7 +1192,6 @@ export default function ChatTab({
       const uid = user?.id
       if (!uid) return
       setUserId(uid)
-      setStreak(getStreak(uid))
       const stored = localStorage.getItem(
         `ai_wallet_onboarding_${uid}`
       )
@@ -1179,6 +1217,19 @@ export default function ChatTab({
   useEffect(() => {
     if (transactions !== undefined) setDataLoaded(true)
   }, [transactions])
+
+  // ── Hito de streak alcanzado → celebración + análisis especial ──
+  useEffect(() => {
+    if (!justReachedMilestone) return
+    const timer = setTimeout(() => {
+      addMessage(justReachedMilestone.mensaje, 'ai', true, 'insight')
+      clearMilestone()
+      setTimeout(() => {
+        handleSendMessage(justReachedMilestone.analisisIntent)
+      }, 1500)
+    }, 800)
+    return () => clearTimeout(timer)
+  }, [justReachedMilestone]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Resumen semanal → ahora es card, no mensaje ──
   useEffect(() => {
@@ -1406,8 +1457,9 @@ export default function ChatTab({
               categorias: categoriasClasificadas,
             }
           : null,
+      perfil_coach: buildProfileContext(),
     }
-  }, [ctx, selectedMonth, transactions, onboarding, coachState])
+  }, [ctx, selectedMonth, transactions, onboarding, coachState, buildProfileContext])
 
   const addMessage = useCallback(
     (
@@ -1507,16 +1559,42 @@ export default function ChatTab({
         data.mensaje_respuesta || 'No pude procesar tu mensaje'
       const msgType: Message['type'] =
         data.action === 'INSERT_TRANSACTION' ? 'success' : 'normal'
-      addMessage(aiText, 'ai', false, msgType)
+
+      let uiCard: Message['ui'] | undefined
+      if (data.ui?.type && ctx) {
+        uiCard = {
+          type: data.ui.type,
+          data: enrichUIData(
+            data.ui.type,
+            ctx,
+            data.data as Record<string, unknown> | undefined
+          ),
+        }
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-${Math.random()}`,
+          text: aiText,
+          sender: 'ai',
+          timestamp: new Date(),
+          isAuto: false,
+          type: msgType,
+          ui: uiCard,
+        },
+      ])
       if (sessionId) await persistMessage(sessionId, 'assistant', aiText)
+
+      // Fire-and-forget: extrae info personal persistente si la hay
+      if (/quiero|objetivo|meta|ahorrar para|cobro el|me pagan|trabajo|no puedo|restricci|siempre|nunca|cuotas fijas|en negro|dólares|dolares/i.test(message)) {
+        extractAndUpdateProfile(message, updateProfile)
+      }
 
       if (data.action === 'INSERT_TRANSACTION') {
         setShowSuccessFlash(true)
         setTimeout(() => setShowSuccessFlash(false), 1800)
-        if (userId) {
-          const newStreak = bumpStreak(userId)
-          setStreak(newStreak)
-        }
+        bumpStreak()
       }
 
       if (
@@ -1575,8 +1653,8 @@ export default function ChatTab({
     [ctx, coachState]
   )
   const welcome = useMemo(
-    () => getWelcome(ctx, coachState, accounts, onboarding.nombre, streak),
-    [ctx, coachState, accounts, onboarding.nombre, streak]
+    () => getWelcome(ctx, coachState, accounts, onboarding.nombre, streakCount),
+    [ctx, coachState, accounts, onboarding.nombre, streakCount]
   )
   const showQuickActions =
     messages.length === 0 ||
@@ -1698,14 +1776,7 @@ export default function ChatTab({
         </div>
 
         <div className="flex items-center gap-2">
-          {streak > 1 && (
-            <div className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#FF6D00]/15 border border-[#FF6D00]/20">
-              <Flame size={11} className="text-[#FF6D00]" />
-              <span className="text-[#FF6D00] text-[11px] font-semibold">
-                {streak}
-              </span>
-            </div>
-          )}
+          <StreakBadge streak={streakData} />
           {ctx &&
             coachState !== 'sin_cuentas' &&
             coachState !== 'sin_transacciones' && (
@@ -1822,6 +1893,9 @@ export default function ChatTab({
                           {msg.text}
                         </p>
                       </div>
+                      {msg.ui && (
+                        <ChatUICard type={msg.ui.type} data={msg.ui.data} />
+                      )}
                       {msg.isAuto && (
                         <p className="text-white/20 text-[10px] mt-0.5 ml-1">
                           respuesta instantánea

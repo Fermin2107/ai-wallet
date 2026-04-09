@@ -61,6 +61,7 @@ export interface RequestContext {
     faltante: number;
   }>;
   alertas?: string[];
+  perfil_coach?: string | null;
   historico?: {
     meses_analizados: number;
     gasto_mensual_promedio: number;
@@ -171,8 +172,20 @@ Si el usuario es nuevo (sin transacciones), aplicá heurísticas:
   Salidas: 10-14%, Servicios: 8-11%, Suscripciones: 4-6%, Salud: 6-9%
 Calculá sobre disponible = ingreso - ahorro.
 
-FORMATO:
-{"action":"RESPUESTA_CONSULTA","mensaje_respuesta":"respuesta con números reales","data":null}`;
+━━━ UI HINTS (opcional — solo cuando agrega valor real) ━━━━━━
+
+Agregá "ui":{"type":"TIPO","data":{}} al JSON cuando aplique:
+- Pregunta sobre estado del mes / cómo voy / resumen → "progress_bar"
+- Pregunta sobre categorías / en qué gasté / top gastos → "category_chips"
+- Pregunta sobre gasto diario / cuánto puedo gastar → "daily_limit"
+data siempre va vacío {}. El frontend lo completa con datos reales.
+No agregues ui si la pregunta no es sobre alguno de esos temas.
+
+FORMATO sin ui:
+{"action":"RESPUESTA_CONSULTA","mensaje_respuesta":"respuesta con números reales","data":null}
+
+FORMATO con ui (ejemplo):
+{"action":"RESPUESTA_CONSULTA","mensaje_respuesta":"Gastaste $X este mes...","data":null,"ui":{"type":"progress_bar","data":{}}}`;
 
 // ~220 tokens — solo para intent 'gestion_cuentas'
 export const SYSTEM_PROMPT_GESTION_CUENTAS = `
@@ -233,7 +246,19 @@ FORMATO:
 ━━━ USUARIO SIN TRANSACCIONES — VALUE FIRST ━━━━━━━━━━━━━━━━━
 
 PROHIBIDO: "no tenés datos", "no puedo calcular".
-OBLIGATORIO: estimá con las heurísticas y dá el número concreto.`;
+OBLIGATORIO: estimá con las heurísticas y dá el número concreto.
+
+━━━ UI HINTS (opcional — solo cuando agrega valor real) ━━━━━━
+
+Agregá "ui":{"type":"TIPO","data":{}} al JSON cuando aplique:
+- Análisis del mes / resumen / proyección → "progress_bar"
+- Análisis de categorías / top gastos / en qué gasté → "category_chips"
+- Respuesta sobre una meta específica / cómo van mis metas → "goal_card"
+- Alerta de presupuesto / categoría en riesgo / límites → "budget_alert"
+- Gasto diario / cuánto puedo gastar por día → "daily_limit"
+- Plan mensual generado (action PLAN_MENSUAL) → "plan_mensual"
+data siempre va vacío {}. El frontend lo completa con datos reales.
+Solo un ui por respuesta. No lo uses en registros ni en respuestas cortas.`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PARTE 1 — classifyIntent
@@ -395,6 +420,7 @@ export function buildDynamicContext(
       ``,
       `RESUMEN FINANCIERO:`,
       context.resumen_financiero ?? 'Sin datos disponibles',
+      context.perfil_coach ? `\n${context.perfil_coach}` : '',
     ].filter(Boolean).join('\n');
   }
 
@@ -436,6 +462,8 @@ export function buildDynamicContext(
     ``,
     `CUENTA RESUELTA: ${serverResolvedAccountId ? `id ${serverResolvedAccountId} — usar como account_id` : 'ninguna — account_id = null'}`,
     ``,
+    context.perfil_coach ?? '',
+    context.perfil_coach ? `` : '',
     `RESUMEN DE CUENTAS:`,
     `  total_liquid: $${liquidBalance.toLocaleString('es-AR')}`,
     `  total_savings: $${savingsBalance.toLocaleString('es-AR')}`,
@@ -587,12 +615,15 @@ function cleanAndParseAIResponse(raw: string): ChatResponse {
   }
 
   try {
-    const parsed = JSON.parse(jsonMatch[0]) as Partial<ChatResponse>;
+    const parsed = JSON.parse(jsonMatch[0]) as Partial<ChatResponse> & {
+      ui?: { type: string; data: Record<string, unknown> };
+    };
     return {
       action: parsed.action ?? 'RESPUESTA_CONSULTA',
       mensaje_respuesta: parsed.mensaje_respuesta ?? 'Procesé tu solicitud.',
       data: parsed.data ?? {},
-    };
+      ...(parsed.ui ? { ui: parsed.ui } : {}),
+    } as ChatResponse;
   } catch {
     return {
       action: 'RESPUESTA_CONSULTA',

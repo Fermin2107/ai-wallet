@@ -206,6 +206,10 @@ export interface ChatResponse {
     filters?: Record<string, unknown>;
     query_result?: unknown;
   };
+  ui?: {
+    type: 'progress_bar' | 'category_chips' | 'goal_card' | 'budget_alert' | 'daily_limit' | 'plan_mensual';
+    data: Record<string, unknown>;
+  };
 }
 
 // ─── CATEGORÍAS ───────────────────────────────────────────────────────────────
