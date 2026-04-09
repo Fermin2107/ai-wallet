@@ -121,7 +121,7 @@ export default function StreakBadge({ streak }: StreakBadgeProps) {
                     />
                   </div>
                   <p className="text-[11px] text-white/30 mt-2 leading-relaxed">
-                    "{nextMilestone.mensaje}"
+                    &ldquo;{nextMilestone.mensaje}&rdquo;
                   </p>
                 </div>
               )}

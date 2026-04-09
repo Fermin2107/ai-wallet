@@ -28,13 +28,13 @@ import {
 // TIPOS
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type BackendIntent =
+type BackendIntent =
   | 'registro'
   | 'consulta_simple'
   | 'gestion_cuentas'
   | 'complejo';
 
-export interface RequestContext {
+interface RequestContext {
   nombre_usuario?: string;
   medio_pago_habitual?: string;
   fecha_hoy?: string;
@@ -94,7 +94,7 @@ export interface RequestContext {
 
 // ~400 tokens — se manda SIEMPRE. DEBE ser byte-idéntico entre requests para maximizar cache.
 // NO interpolar variables acá.
-export const SYSTEM_PROMPT_BASE = `Sos el coach financiero personal del usuario en AI Wallet.
+const SYSTEM_PROMPT_BASE = `Sos el coach financiero personal del usuario en AI Wallet.
 
 ━━━ PERSONALIDAD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -138,7 +138,7 @@ Estructura obligatoria:
 Si no tenés data, usá "data": null. Nunca omitas las tres claves.`;
 
 // ~220 tokens — solo para intent 'registro'
-export const SYSTEM_PROMPT_REGISTRO = `
+const SYSTEM_PROMPT_REGISTRO = `
 ━━━ ROL: REGISTRAR GASTOS E INGRESOS ━━━━━━━━━━━━━━━━━━━━━━━━
 
 FLUJO:
@@ -163,7 +163,7 @@ Gasto:   {"action":"INSERT_TRANSACTION","mensaje_respuesta":"confirmación breve
 Ingreso: {"action":"INSERT_TRANSACTION","mensaje_respuesta":"confirmación breve","data":{"description":"texto","amount":numero,"type":"ingreso","category":"ingreso","transaction_date":"YYYY-MM-DD","confirmed":true,"installment_count":1,"first_due_month":null,"account_id":"uuid-o-null"}}`;
 
 // ~150 tokens — solo para intent 'consulta_simple'
-export const SYSTEM_PROMPT_CONSULTA = `
+const SYSTEM_PROMPT_CONSULTA = `
 ━━━ ROL: CONSULTAS CON NÚMEROS REALES ━━━━━━━━━━━━━━━━━━━━━━━
 
 Usar EXACTAMENTE los números del ESTADO del contexto. Nunca inventar.
@@ -188,7 +188,7 @@ FORMATO con ui (ejemplo):
 {"action":"RESPUESTA_CONSULTA","mensaje_respuesta":"Gastaste $X este mes...","data":null,"ui":{"type":"progress_bar","data":{}}}`;
 
 // ~220 tokens — solo para intent 'gestion_cuentas'
-export const SYSTEM_PROMPT_GESTION_CUENTAS = `
+const SYSTEM_PROMPT_GESTION_CUENTAS = `
 ━━━ ROL: GESTIÓN DE CUENTAS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 DETECTAR qué quiere el usuario:
@@ -209,7 +209,7 @@ Crear cuenta:    {"action":"CREATE_ACCOUNT","mensaje_respuesta":"Listo, agregué
 Actualizar saldo:{"action":"UPDATE_ACCOUNT_BALANCE","mensaje_respuesta":"Actualizado. Ahora tenés $X en [cuenta]. ¿Registramos algún movimiento?","data":{"account_name":"nombre","new_balance":numero}}`;
 
 // ~850 tokens — solo para intent 'complejo'
-export const SYSTEM_PROMPT_COMPLEJO = `
+const SYSTEM_PROMPT_COMPLEJO = `
 ━━━ ROL: OPTIMIZACIÓN DE GASTOS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ESENCIALES: alimentacion, alquiler, servicios, salud, transporte, educacion
@@ -325,7 +325,7 @@ function classifyIntent(message: string): BackendIntent {
 // Minimización extrema: cada intent recibe solo lo que necesita.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function buildDynamicContext(
+function buildDynamicContext(
   intent: BackendIntent,
   context: RequestContext,
   accountsData: AccountRow[],
@@ -494,7 +494,7 @@ export function buildDynamicContext(
 // PARTE 3 — buildSystemPrompt
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function buildSystemPrompt(intent: BackendIntent): string {
+function buildSystemPrompt(intent: BackendIntent): string {
   // El BASE siempre va primero y es byte-idéntico → maximiza cache hit en Groq
   switch (intent) {
     case 'registro':
