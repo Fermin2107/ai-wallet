@@ -7,7 +7,7 @@
 // ========================================
 
 import { useState, useEffect, useCallback } from 'react';
-import { createSupabaseClient, DatabaseTransaction } from '../lib/supabase';
+import { getSupabaseClient, DatabaseTransaction } from '../lib/supabase';
 
 // Tipos para los datos de Supabase
 export interface Budget {
@@ -55,7 +55,7 @@ export function useSupabaseData(): SupabaseData {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const supabase = createSupabaseClient();
+  const supabase = getSupabaseClient();
 
   // Obtener transacciones
   const fetchTransactions = useCallback(async () => {
@@ -197,7 +197,7 @@ export function useSupabaseBudgets() {
   const { budgets, loading, error, refresh } = useSupabaseData();
   
   const updateBudget = useCallback(async (id: string, limitAmount: number) => {
-    const supabase = createSupabaseClient();
+    const supabase = getSupabaseClient();
     
     try {
       const { error } = await supabase
@@ -229,7 +229,7 @@ export function useSupabaseGoals() {
   const { goals, loading, error, refresh } = useSupabaseData();
   
   const updateGoal = useCallback(async (id: string, currentAmount: number) => {
-    const supabase = createSupabaseClient();
+    const supabase = getSupabaseClient();
     
     try {
       const { error } = await supabase
@@ -251,7 +251,7 @@ export function useSupabaseGoals() {
   }, [refresh, goals]);
 
   const addGoal = useCallback(async (goal: Omit<Goal, 'id' | 'progress_percentage' | 'remaining_amount' | 'status' | 'daily_needed' | 'description'> & { description?: string }) => {
-    const supabase = createSupabaseClient();
+    const supabase = getSupabaseClient();
     
     try {
       const { error } = await supabase

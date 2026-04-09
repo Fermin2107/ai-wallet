@@ -1,8 +1,14 @@
-// ========================================
-// AI Wallet - Hook Simple Supabase con Fetch Directo
-// ========================================
-// Archivo: hooks/useSimpleSupabase.ts
-// ========================================
+// ============================================================
+// AI Wallet — Hook useSimpleSupabase (actualizado)
+// ============================================================
+// hooks/useSimpleSupabase.ts
+//
+// Cambios respecto a la versión anterior:
+//   - SimpleAccount incluye closing_day, due_day, color, icon
+//   - fetchAllData incluye los nuevos campos
+//   - createAccount persiste closing_day, due_day
+//   - is_default ahora es gestionado con unicidad por tipo
+// ============================================================
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { getSupabaseClient } from '../lib/supabase';
@@ -39,12 +45,23 @@ export interface SimpleGoal {
   is_completed: boolean;
 }
 
+/**
+ * Semántica de balance:
+ *   liquid / savings → saldo disponible (positivo = tiene plata)
+ *   credit           → deuda actual     (positivo = debe esa cantidad)
+ *
+ * disponible_tarjeta = credit_limit - balance  (calculado en componente/hook)
+ */
 export interface SimpleAccount {
   id: string;
   name: string;
   type: 'liquid' | 'credit' | 'savings';
   balance: number;
   credit_limit?: number | null;
+  closing_day?: number | null;
+  due_day?: number | null;
+  color?: string | null;
+  icon?: string | null;
   is_default: boolean;
   currency: string;
 }
@@ -65,6 +82,8 @@ export interface CreateAccountInput {
   credit_limit?: number;
   closing_day?: number;
   due_day?: number;
+  color?: string;
+  icon?: string;
   is_default?: boolean;
 }
 
@@ -78,7 +97,7 @@ export interface UseSimpleSupabaseReturn {
   error: string | null;
   refresh: (selectedMonth?: string) => Promise<void>;
   updateGoal: (id: string, updates: Partial<SimpleGoal>) => Promise<boolean>;
-  createGoal: (goal: Omit<SimpleGoal, 'id' | 'created_at' | 'is_active' | 'is_completed'>) => Promise<boolean>;
+  createGoal: (goal: Omit<SimpleGoal, 'id' | 'is_completed'>) => Promise<boolean>;
   updateBudget: (id: string, limitAmount: number) => Promise<boolean>;
   createBudget: (category: string, limitAmount: number, monthPeriod?: string) => Promise<boolean>;
   deleteBudget: (id: string) => Promise<boolean>;
@@ -86,93 +105,99 @@ export interface UseSimpleSupabaseReturn {
   createAccount: (data: CreateAccountInput) => Promise<SimpleAccount | null>;
 }
 
-// ✅ Helper: siempre obtiene el userId fresco, nunca desde estado
-async function getFreshUserId(supabase: ReturnType<typeof getSupabaseClient>): Promise<string | null> {
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+async function getFreshUserId(
+  supabase: ReturnType<typeof getSupabaseClient>
+): Promise<string | null> {
   try {
-    // getUser() hace una llamada al servidor — nunca devuelve null si estás logueado
     const { data: { user } } = await supabase.auth.getUser();
-    const userId = user?.id || null;
-    console.log('🔑 getFreshUserId:', userId || 'NULL');
-    return userId;
-  } catch (err) {
-    console.error('❌ Error obteniendo userId:', err);
+    return user?.id || null;
+  } catch {
     return null;
   }
 }
 
-// ✅ Helper: refresca todos los datos y actualiza estado
 async function fetchAllData(supabase: ReturnType<typeof getSupabaseClient>) {
   const [transactionsRes, budgetsRes, goalsRes, accountsRes, installmentsRes] = await Promise.all([
-    supabase.from('transactions').select('*').order('created_at', { ascending: false }),
-    supabase.from('budgets').select('*').order('category'),
-    supabase.from('goals').select('*').eq('is_active', true).order('target_date', { ascending: true }),
-    supabase.from('accounts').select('id, name, type, balance, credit_limit, is_default, currency').eq('is_active', true),
-    supabase.from('installments').select('id, transaction_id, account_id, due_month, amount, is_paid').eq('is_paid', false)
+    supabase
+      .from('transactions')
+      .select('*')
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('budgets')
+      .select('*')
+      .order('category'),
+    supabase
+      .from('goals')
+      .select('*')
+      .eq('is_active', true)
+      .order('target_date', { ascending: true }),
+    supabase
+      .from('accounts')
+      .select('id, name, type, balance, credit_limit, closing_day, due_day, color, icon, is_default, currency')
+      .eq('is_active', true)
+      .order('created_at', { ascending: true }),
+    supabase
+      .from('installments')
+      .select('id, transaction_id, account_id, due_month, amount, is_paid')
+      .eq('is_paid', false),
   ]);
 
   if (transactionsRes.error) throw new Error(`Transacciones: ${transactionsRes.error.message}`);
-  if (budgetsRes.error) throw new Error(`Presupuestos: ${budgetsRes.error.message}`);
-  if (goalsRes.error) throw new Error(`Metas: ${goalsRes.error.message}`);
-  // accounts/installments: tolerate missing table during migration
-  const accounts = accountsRes.error ? [] : (accountsRes.data || []);
-  const installments = installmentsRes.error ? [] : (installmentsRes.data || []);
+  if (budgetsRes.error)      throw new Error(`Presupuestos: ${budgetsRes.error.message}`);
+  if (goalsRes.error)        throw new Error(`Metas: ${goalsRes.error.message}`);
 
   return {
     transactions: transactionsRes.data || [],
-    budgets: budgetsRes.data || [],
-    goals: goalsRes.data || [],
-    accounts,
-    installments,
+    budgets:      budgetsRes.data      || [],
+    goals:        goalsRes.data        || [],
+    accounts:     accountsRes.error    ? [] : (accountsRes.data     || []),
+    installments: installmentsRes.error ? [] : (installmentsRes.data || []),
   };
 }
 
+// ─── Hook ─────────────────────────────────────────────────────────────────────
+
 export function useSimpleSupabase(): UseSimpleSupabaseReturn {
   const [transactions, setTransactions] = useState<SimpleTransaction[]>([]);
-  const [budgets, setBudgets] = useState<SimpleBudget[]>([]);
-  const [goals, setGoals] = useState<SimpleGoal[]>([]);
-  const [accounts, setAccounts] = useState<SimpleAccount[]>([]);
+  const [budgets, setBudgets]           = useState<SimpleBudget[]>([]);
+  const [goals, setGoals]               = useState<SimpleGoal[]>([]);
+  const [accounts, setAccounts]         = useState<SimpleAccount[]>([]);
   const [installments, setInstallments] = useState<SimpleInstallment[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading]           = useState(true);
+  const [error, setError]               = useState<string | null>(null);
 
-  // Supabase singleton estable
   const supabaseRef = useRef<ReturnType<typeof getSupabaseClient> | null>(null);
-  if (!supabaseRef.current) {
-    supabaseRef.current = getSupabaseClient();
-  }
+  if (!supabaseRef.current) supabaseRef.current = getSupabaseClient();
   const supabase = supabaseRef.current;
 
-  // ✅ Helper interno para actualizar estado desde resultado
-  const applyData = useCallback((data: { transactions: any[], budgets: any[], goals: any[], accounts: any[], installments: any[] }) => {
-    setTransactions(data.transactions);
-    setBudgets(data.budgets);
-    setGoals(data.goals);
-    setAccounts(data.accounts);
-    setInstallments(data.installments);
-    setError(null);
-  }, []);
+  const applyData = useCallback(
+    (data: { transactions: any[]; budgets: any[]; goals: any[]; accounts: any[]; installments: any[] }) => {
+      setTransactions(data.transactions);
+      setBudgets(data.budgets);
+      setGoals(data.goals);
+      setAccounts(data.accounts);
+      setInstallments(data.installments);
+      setError(null);
+    },
+    []
+  );
 
-  // Función de refresco
   const refresh = useCallback(async () => {
-    console.log('🔄 Starting refresh...');
     setLoading(true);
     setError(null);
     try {
       const data = await fetchAllData(supabase);
       applyData(data);
-      console.log('✅ Refresh completado');
     } catch (err) {
-      console.error('❌ Error en refresh:', err);
       setError(err instanceof Error ? err.message : 'Error al actualizar datos');
-      setTransactions([]);
-      setBudgets([]);
-      setGoals([]);
+      setTransactions([]); setBudgets([]); setGoals([]);
     } finally {
       setLoading(false);
     }
-  }, [applyData]);
+  }, [applyData, supabase]);
 
-  // Inicialización y listener de auth
   useEffect(() => {
     let isMounted = true;
 
@@ -181,15 +206,10 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
         setLoading(true);
         setError(null);
 
-        // ← CRÍTICO: verificar sesión activa antes de fetchear
         const { data: { user } } = await supabase.auth.getUser();
         if (!user) {
-          // Sin usuario autenticado — limpiar y no fetchear
           if (isMounted) {
-            setTransactions([]);
-            setBudgets([]);
-            setGoals([]);
-            setLoading(false);
+            setTransactions([]); setBudgets([]); setGoals([]); setLoading(false);
           }
           return;
         }
@@ -199,9 +219,7 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
       } catch (err) {
         if (isMounted) {
           setError(err instanceof Error ? err.message : 'Error desconocido');
-          setTransactions([]);
-          setBudgets([]);
-          setGoals([]);
+          setTransactions([]); setBudgets([]); setGoals([]);
         }
       } finally {
         if (isMounted) setLoading(false);
@@ -210,25 +228,15 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
 
     loadData();
 
-    // ✅ Recargar cuando el usuario vuelve a la pestaña
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        loadData();
-      }
+      if (document.visibilityState === 'visible') loadData();
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event) => {
-      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
-        await loadData();
-      }
-      if (event === 'SIGNED_OUT') {
-        if (isMounted) {
-          setTransactions([]);
-          setBudgets([]);
-          setGoals([]);
-          setLoading(false);
-        }
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') await loadData();
+      if (event === 'SIGNED_OUT' && isMounted) {
+        setTransactions([]); setBudgets([]); setGoals([]); setLoading(false);
       }
     });
 
@@ -237,46 +245,28 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
       subscription.unsubscribe();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── GOALS ───────────────────────────────────────────────
+  // ── Goals ────────────────────────────────────────────────────────────────
 
   const createGoal = useCallback(async (data: Omit<SimpleGoal, 'id' | 'is_completed'>): Promise<boolean> => {
     try {
-      // ✅ Siempre obtener userId fresco — nunca desde estado
       const userId = await getFreshUserId(supabase);
-      if (!userId) {
-        console.error('❌ No hay userId para crear goal');
-        setError('Usuario no autenticado');
-        return false;
-      }
+      if (!userId) { setError('Usuario no autenticado'); return false; }
 
-      console.log('🎯 Creando goal con userId:', userId);
+      const { error } = await supabase.from('goals').insert({ ...data, is_completed: false, user_id: userId });
+      if (error) { setError(error.message); return false; }
 
-      const { error } = await supabase
-        .from('goals')
-        .insert({ ...data, is_completed: false, user_id: userId });
-
-      if (error) {
-        console.error('❌ Error creando goal:', error);
-        setError(error.message);
-        return false;
-      }
-
-      const freshData = await fetchAllData(supabase);
-      applyData(freshData);
-      console.log('✅ Goal creado exitosamente');
+      applyData(await fetchAllData(supabase));
       return true;
     } catch (err) {
-      console.error('❌ Error en createGoal:', err);
       setError(err instanceof Error ? err.message : 'Error desconocido');
       return false;
     }
-  }, [applyData]);
+  }, [applyData, supabase]);
 
   const updateGoal = useCallback(async (id: string, data: Partial<SimpleGoal>): Promise<boolean> => {
     try {
-      // Build is_completed: explicit value wins; otherwise derive from amounts if provided
       const is_completed =
         data.is_completed !== undefined
           ? data.is_completed
@@ -288,190 +278,142 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
       if (is_completed !== undefined) payload.is_completed = is_completed;
       else delete payload.is_completed;
 
-      const { error } = await supabase
-        .from('goals')
-        .update(payload)
-        .eq('id', id);
+      const { error } = await supabase.from('goals').update(payload).eq('id', id);
+      if (error) { setError(error.message); return false; }
 
-      if (error) {
-        console.error('❌ Error actualizando goal:', error);
-        return false;
-      }
-
-      const freshData = await fetchAllData(supabase);
-      applyData(freshData);
+      applyData(await fetchAllData(supabase));
       return true;
     } catch (err) {
-      console.error('❌ Error en updateGoal:', err);
       setError(err instanceof Error ? err.message : 'Error desconocido');
       return false;
     }
-  }, [applyData]);
+  }, [applyData, supabase]);
 
-  // ─── BUDGETS ─────────────────────────────────────────────
+  // ── Budgets ───────────────────────────────────────────────────────────────
 
-  const createBudget = useCallback(async (category: string, limitAmount: number, monthPeriod?: string): Promise<boolean> => {
+  const createBudget = useCallback(async (
+    category: string,
+    limitAmount: number,
+    monthPeriod?: string
+  ): Promise<boolean> => {
     try {
-      // ✅ Siempre obtener userId fresco — nunca desde estado
       const userId = await getFreshUserId(supabase);
-      if (!userId) {
-        console.error('❌ No hay userId para crear budget');
-        setError('Usuario no autenticado');
-        return false;
-      }
+      if (!userId) { setError('Usuario no autenticado'); return false; }
 
-      console.log('💰 Creando budget con userId:', userId);
+      const { error } = await supabase.from('budgets').insert({
+        category:     category.toLowerCase().trim(),
+        limit_amount: limitAmount,
+        month_period: monthPeriod || new Date().toISOString().slice(0, 7),
+        user_id:      userId,
+      });
+      if (error) { setError(error.message); return false; }
 
-      const normalizedCategory = category.toLowerCase().trim();
-      const budgetMonthPeriod = monthPeriod || new Date().toISOString().slice(0, 7);
-
-      const { error } = await supabase
-        .from('budgets')
-        .insert({
-          category: normalizedCategory,
-          limit_amount: limitAmount,
-          month_period: budgetMonthPeriod,
-          user_id: userId
-        });
-
-      if (error) {
-        console.error('❌ Error creando budget:', error.message, error.code, error.details);
-        setError(error.message);
-        return false;
-      }
-
-      const freshData = await fetchAllData(supabase);
-      applyData(freshData);
-      console.log('✅ Budget creado exitosamente');
+      applyData(await fetchAllData(supabase));
       return true;
     } catch (err) {
-      console.error('❌ Error en createBudget:', err);
       setError(err instanceof Error ? err.message : 'Error desconocido');
       return false;
     }
-  }, [applyData]);
+  }, [applyData, supabase]);
 
   const updateBudget = useCallback(async (id: string, limitAmount: number): Promise<boolean> => {
     try {
-      const { error } = await supabase
-        .from('budgets')
-        .update({ limit_amount: limitAmount })
-        .eq('id', id);
-
-      if (error) {
-        console.error('❌ Error actualizando budget:', error);
-        return false;
-      }
-
-      const freshData = await fetchAllData(supabase);
-      applyData(freshData);
+      const { error } = await supabase.from('budgets').update({ limit_amount: limitAmount }).eq('id', id);
+      if (error) return false;
+      applyData(await fetchAllData(supabase));
       return true;
-    } catch (err) {
-      console.error('❌ Error en updateBudget:', err);
-      setError(err instanceof Error ? err.message : 'Error desconocido');
-      return false;
-    }
-  }, [applyData]);
+    } catch { return false; }
+  }, [applyData, supabase]);
 
   const deleteBudget = useCallback(async (id: string): Promise<boolean> => {
     try {
-      const { error } = await supabase
-        .from('budgets')
-        .delete()
-        .eq('id', id);
-
-      if (error) {
-        console.error('❌ Error eliminando budget:', error);
-        return false;
-      }
-
-      const freshData = await fetchAllData(supabase);
-      applyData(freshData);
+      const { error } = await supabase.from('budgets').delete().eq('id', id);
+      if (error) return false;
+      applyData(await fetchAllData(supabase));
       return true;
-    } catch (err) {
-      console.error('❌ Error en deleteBudget:', err);
-      setError(err instanceof Error ? err.message : 'Error desconocido');
-      return false;
-    }
-  }, [applyData]);
+    } catch { return false; }
+  }, [applyData, supabase]);
 
-  // ─── ACCOUNTS ────────────────────────────────────────────
+  // ── Accounts ─────────────────────────────────────────────────────────────
 
   const createAccount = useCallback(async (data: CreateAccountInput): Promise<SimpleAccount | null> => {
     try {
       const userId = await getFreshUserId(supabase);
       if (!userId) { setError('Usuario no autenticado'); return null; }
 
-      // Clear existing default first if this one should become default
+      // Garantizar unicidad de default por tipo
       if (data.is_default) {
         await supabase
           .from('accounts')
           .update({ is_default: false })
           .eq('user_id', userId)
+          .eq('type', data.type)
           .eq('is_default', true);
       }
 
       const { data: account, error } = await supabase
         .from('accounts')
         .insert({
-          user_id: userId,
-          name: data.name,
-          type: data.type,
-          balance: data.balance,
-          credit_limit: data.credit_limit ?? null,
-          closing_day:  data.closing_day  ?? null,
-          due_day:      data.due_day      ?? null,
-          is_default: data.is_default ?? false,
-          is_active: true,
-          currency: 'ARS',
+          user_id:      userId,
+          name:         data.name,
+          type:         data.type,
+          balance:      data.balance,
+          credit_limit: data.credit_limit  ?? null,
+          closing_day:  data.closing_day   ?? null,
+          due_day:      data.due_day       ?? null,
+          color:        data.color         ?? null,
+          icon:         data.icon          ?? null,
+          is_default:   data.is_default    ?? false,
+          is_active:    true,
+          currency:     'ARS',
         })
         .select()
         .single();
 
       if (error) { setError(error.message); return null; }
 
-      const freshData = await fetchAllData(supabase);
-      applyData(freshData);
+      applyData(await fetchAllData(supabase));
       return account as SimpleAccount;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error desconocido');
       return null;
     }
-  }, [applyData]);
+  }, [applyData, supabase]);
 
   const setDefaultAccount = useCallback(async (id: string): Promise<boolean> => {
     try {
       const userId = await getFreshUserId(supabase);
       if (!userId) { setError('Usuario no autenticado'); return false; }
 
-      // Remove current default, then set new one (two steps to avoid unique constraint conflict)
-      const { error: clearErr } = await supabase
+      // Obtener tipo de la cuenta a marcar como default
+      const target = accounts.find((a) => a.id === id);
+      if (!target) return false;
+
+      // Quitar default del mismo tipo
+      await supabase
         .from('accounts')
         .update({ is_default: false })
         .eq('user_id', userId)
+        .eq('type', target.type)
         .eq('is_default', true);
-      if (clearErr) { setError(clearErr.message); return false; }
 
-      const { error: setErr } = await supabase
-        .from('accounts')
-        .update({ is_default: true })
-        .eq('id', id);
-      if (setErr) { setError(setErr.message); return false; }
+      // Poner nuevo default
+      const { error } = await supabase.from('accounts').update({ is_default: true }).eq('id', id);
+      if (error) { setError(error.message); return false; }
 
-      const freshData = await fetchAllData(supabase);
-      applyData(freshData);
+      applyData(await fetchAllData(supabase));
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error desconocido');
       return false;
     }
-  }, [applyData]);
+  }, [accounts, applyData, supabase]);
 
   return {
     transactions: transactions || [],
-    budgets: budgets || [],
-    goals: goals || [],
-    accounts: accounts || [],
+    budgets:      budgets      || [],
+    goals:        goals        || [],
+    accounts:     accounts     || [],
     installments: installments || [],
     loading,
     error,

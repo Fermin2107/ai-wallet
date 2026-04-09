@@ -85,6 +85,8 @@ export interface TransactionInsert {
   budget_id?: string;
   goal_id?: string;
   account_id?: string | null;
+  installment_count?: number;
+  first_due_month?: string;
 }
 
 // Utilidades para manejo de errores
