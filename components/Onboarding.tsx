@@ -12,7 +12,7 @@ interface OnboardingData {
   nombre: string
   ingreso: number
   categorias: string[]
-  medioPago: 'efectivo' | 'debito' | 'credito' | 'mixto'
+  medioPago: 'efectivo' | 'billetera' | 'debito' | 'credito' | 'mixto'
   objetivo: number
   suenio: string
 }
@@ -30,10 +30,11 @@ const CATEGORIAS = [
 ]
 
 const MEDIOS_PAGO = [
-  { id: 'efectivo' as const, emoji: '💵', label: 'Efectivo',  desc: 'Pago todo o casi todo en cash' },
-  { id: 'debito'   as const, emoji: '💳', label: 'Débito',    desc: 'Uso la tarjeta de débito' },
-  { id: 'credito'  as const, emoji: '🏦', label: 'Crédito',   desc: 'Pago con tarjeta de crédito' },
-  { id: 'mixto'    as const, emoji: '🔀', label: 'Mixto',     desc: 'Combino varios medios' },
+  { id: 'efectivo'  as const, emoji: '💵', label: 'Efectivo',           desc: 'Pago todo o casi todo en cash' },
+  { id: 'billetera' as const, emoji: '📱', label: 'Billetera virtual',  desc: 'Mercado Pago, Ualá, Naranja X...' },
+  { id: 'debito'    as const, emoji: '🏦', label: 'Cuenta bancaria',    desc: 'Uso débito o transferencias' },
+  { id: 'credito'   as const, emoji: '💳', label: 'Tarjeta de crédito', desc: 'Pago con tarjeta de crédito' },
+  { id: 'mixto'     as const, emoji: '🔀', label: 'Varios medios',      desc: 'Combino efectivo, billetera y/o tarjeta' },
 ]
 
 const BUDGET_WEIGHTS: Record<string, number> = {
@@ -122,7 +123,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
   const [saving, setSaving] = useState(false)
   const [userId, setUserId] = useState<string | null>(null)
   const [formData, setFormData] = useState<OnboardingData>({
-    nombre: '', ingreso: 0, categorias: [], medioPago: 'mixto', objetivo: 0, suenio: '',
+    nombre: '', ingreso: 0, categorias: [], medioPago: 'billetera', objetivo: 0, suenio: '',
   })
   const [distribucionEditada, setDistribucionEditada] = useState<Record<string, number>>({})
 
@@ -177,6 +178,8 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
   const crearCuentaAutomatica = async () => {
     if (formData.medioPago === 'efectivo') {
       await createAccount({ name: 'Efectivo', type: 'liquid', balance: 0, is_default: true })
+    } else if (formData.medioPago === 'billetera') {
+      await createAccount({ name: 'Mercado Pago', type: 'liquid', balance: 0, is_default: true })
     } else if (formData.medioPago === 'debito') {
       await createAccount({ name: 'Cuenta bancaria', type: 'liquid', balance: 0, is_default: true })
     }
@@ -260,9 +263,9 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
             </div>
             <h2 className="text-3xl font-bold text-white">¡Hola! Soy tu coach financiero 👋</h2>
             <p className="text-white/60 text-lg leading-relaxed">
-              Estoy acá para ayudarte a ahorrar más, sin que tengas que entender de finanzas.
+              La mayoría de la gente no sabe en qué se le va la plata. El hecho de que estés acá ya te pone un paso adelante 💪
             </p>
-            <p className="text-white/40">Son 6 preguntas — menos de 2 minutos y tenés tu plan 🎯</p>
+            <p className="text-white/40">En 2 minutos te armo un plan personalizado.</p>
             <button onClick={() => setStep(1)} className="w-full bg-[#00C853] hover:bg-[#00C853]/80 text-black font-semibold py-4 rounded-xl text-lg transition-colors">
               ¡Dale, arrancamos! 🚀
             </button>
@@ -409,9 +412,11 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
         const disponible = formData.ingreso - formData.objetivo
         const medioLabel = MEDIOS_PAGO.find(m => m.id === formData.medioPago)?.label ?? ''
         const cuentaAuto =
-          formData.medioPago === 'efectivo' ? 'Te creo una cuenta "Efectivo" para tus gastos — son 2 segundos.' :
-          formData.medioPago === 'debito'   ? 'Te creo una cuenta bancaria para tus gastos — son 2 segundos.' :
-          'El coach te va a pedir los datos de tu cuenta al llegar al chat.'
+          formData.medioPago === 'efectivo'  ? 'Te creo una cuenta "Efectivo" para registrar tus gastos.' :
+          formData.medioPago === 'billetera' ? 'Te creo una cuenta "Mercado Pago" — podés renombrarla desde el chat.' :
+          formData.medioPago === 'debito'    ? 'Te creo una cuenta bancaria para registrar tus gastos.' :
+          formData.medioPago === 'credito'   ? 'El coach te va a pedir el límite y días de cierre de tu tarjeta.' :
+          'El coach te va a preguntar qué cuentas tenés cuando llegues al chat.'
 
         return (
           <div className="space-y-5">
