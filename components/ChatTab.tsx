@@ -54,6 +54,7 @@ interface Account {
 type CoachState =
   | 'sin_cuentas'
   | 'sin_transacciones'
+  | 'post_onboarding'
   | 'inicio_mes'
   | 'mitad_mes_bien'
   | 'mitad_mes_mal'
@@ -68,6 +69,15 @@ function getCoachState(
   hasBudgets: boolean
 ): CoachState {
   if (!accounts || accounts.length === 0) return 'sin_cuentas'
+
+  // post_onboarding: tiene cuentas pero aún no registró ingreso ni gasto
+  if (
+    accounts.length > 0 &&
+    (!ctx || (ctx.totalIngresado === 0 && ctx.totalGastado === 0))
+  ) {
+    return 'post_onboarding'
+  }
+
   if (!ctx || ctx.totalGastado === 0) return 'sin_transacciones'
 
   const dia = new Date().getDate()
@@ -492,6 +502,13 @@ function getWelcome(
     case 'sin_cuentas':
       return `${saludo}${n} 👋 Para arrancar, contame cuánto tenés disponible ahora. Puede ser efectivo, Mercado Pago, banco... lo que uses más seguido.`
 
+    case 'post_onboarding': {
+      const hora = new Date().getHours()
+      const saludo = hora < 12 ? 'Buenos días' : hora < 19 ? 'Buenas tardes' : 'Buenas noches'
+      const n = nombre ? `, ${nombre}` : ''
+      return `${saludo}${n}! Tu plan está armado 🎯 Para que funcione bien, necesito saber cuándo te entra la plata. ¿Ya cobraste este mes?`
+    }
+
     case 'sin_transacciones': {
       if (!ctx || ctx.ingresoEfectivo <= 0) {
         return `${saludo}${n}! Todavía no registraste gastos este mes. ¿Cuánto fue lo último que pagaste?`
@@ -569,6 +586,31 @@ function getQuickActions(
   const esNoche = hora >= 20
 
   switch (coachState) {
+    case 'post_onboarding':
+      return [
+        {
+          id: 'ya-cobre',
+          emoji: '💰',
+          label: 'Ya cobré',
+          message: 'Ya cobré este mes, quiero registrar mi ingreso',
+          color: 'border-[#00C853]/25 bg-[#00C853]/8',
+        },
+        {
+          id: 'todavia-no',
+          emoji: '📅',
+          label: 'Todavía no',
+          message: 'Todavía no cobré, ¿qué hago mientras tanto?',
+          color: 'border-white/10 bg-white/4',
+        },
+        {
+          id: 'igual-gaste',
+          emoji: '✏️',
+          label: 'Igual gasté algo',
+          message: 'Todavía no cobré pero igual gasté algo hoy',
+          color: 'border-white/10 bg-white/4',
+        },
+      ]
+
     case 'sin_cuentas':
       return [
         {
@@ -1309,7 +1351,7 @@ export default function ChatTab({
   useEffect(() => {
     if (!ctx || !dataLoaded || !userId || isLoading) return
     if (messages.length > 0 || proactiveShown) return
-    if (coachState === 'sin_cuentas' || coachState === 'sin_transacciones')
+    if (coachState === 'sin_cuentas' || coachState === 'sin_transacciones' || coachState === 'post_onboarding')
       return
 
     if (!shouldShowDaily(userId)) return
@@ -1341,7 +1383,7 @@ export default function ChatTab({
   useEffect(() => {
     if (!ctx || !dataLoaded || messages.length > 0 || proactiveShown)
       return
-    if (coachState === 'sin_cuentas' || coachState === 'sin_transacciones')
+    if (coachState === 'sin_cuentas' || coachState === 'sin_transacciones' || coachState === 'post_onboarding')
       return
     if (new Date().getDay() === 1 && transactions.length > 0) return
 

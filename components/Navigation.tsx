@@ -9,10 +9,10 @@ interface NavigationProps {
 }
 
 const tabs = [
-  { id: 'dashboard',  label: 'Inicio',       icon: '🏠' },
-  { id: 'chat',       label: 'Coach',        icon: '💬' },
-  { id: 'budgets',    label: 'Límites',      icon: '📊' },
-  { id: 'metas',      label: 'Metas',        icon: '🎯' },
+  { id: 'dashboard', label: 'Inicio',   icon: '🏠' },
+  { id: 'chat',      label: 'Coach',    icon: '💬' },
+  { id: 'limites',   label: 'Límites',  icon: '💡' },
+  { id: 'metas',     label: 'Metas',    icon: '🎯' },
 ]
 
 export default function Navigation({ activeTab, onTabChange, alertCount = 0 }: NavigationProps) {
@@ -69,7 +69,6 @@ export default function Navigation({ activeTab, onTabChange, alertCount = 0 }: N
               activeTab === tab.id ? 'text-[#00C853]' : 'text-white/35'
             }`}
           >
-            {/* Indicador activo */}
             {activeTab === tab.id && (
               <span className="absolute top-0 left-1/2 -translate-x-1/2 w-6 h-0.5 bg-[#00C853] rounded-full" />
             )}
