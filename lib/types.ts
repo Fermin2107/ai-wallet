@@ -320,3 +320,13 @@ export function formatCategoria(cat: string): string {
     cat.charAt(0).toUpperCase() + cat.slice(1).toLowerCase()
   );
 }
+
+export type {
+  FinancialPatterns,
+  PatronesDiaSemana,
+  ComparativaMeses,
+  Recurrente,
+  GastosHormiga,
+  Tendencia3Meses,
+  NombreDia,
+} from './financial-patterns'

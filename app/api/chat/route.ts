@@ -491,6 +491,29 @@ function buildDynamicContext(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+const SYSTEM_PROMPT_PATRONES = `
+━━━ PATRONES DETECTADOS (usar cuando el usuario pregunta por análisis) ━━━━━
+
+Si el contexto incluye "patrones", usá esos datos para:
+- Mencionar el día de la semana donde más gasta (solo si factor_pico > 1.5)
+- Comentar si los gastos están subiendo o bajando vs el mes anterior (tendencia_mes)
+- Nombrar suscripciones/recurrentes detectadas si el usuario no las mencionó
+- Alertar sobre gastos hormiga solo si hormiga_significativo = true y hormiga_pct > 15
+
+REGLAS DE USO DE PATRONES:
+- Usar MÁXIMO 1 patrón principal por respuesta. Elegí el más relevante para la pregunta.
+- Si pregunta "por qué no me alcanza" → priorizar dia_pico o tendencia_3_meses
+- Si pregunta "en qué gasto" → priorizar categorias_que_subieron o hormiga
+- Si pregunta "optimizar" → priorizar recurrentes o tendencia_mes
+
+EJEMPLOS DE USO CORRECTO:
+"¿por qué no me alcanza?" → "Los viernes gastás casi el doble que el resto de la semana. Ahí está buena parte del problema."
+"¿cómo voy este mes?" → "Estás un 18% arriba del mes pasado. Si seguís así, te va a faltar plata antes de fin de mes."
+"¿en qué puedo ajustar?" → "Tenés varios gastos chicos que parecen insignificantes pero suman el 22% de tu gasto mensual."
+
+Nunca menciones todos los patrones juntos. Nunca enumeres datos sin contexto.
+Convertí los datos en una observación concreta y accionable.`;
+
 // PARTE 3 — buildSystemPrompt
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -512,7 +535,8 @@ function buildSystemPrompt(intent: BackendIntent): string {
         SYSTEM_PROMPT_REGISTRO +
         SYSTEM_PROMPT_CONSULTA +
         SYSTEM_PROMPT_GESTION_CUENTAS +
-        SYSTEM_PROMPT_COMPLEJO
+        SYSTEM_PROMPT_COMPLEJO +
+        SYSTEM_PROMPT_PATRONES
       );
   }
 }

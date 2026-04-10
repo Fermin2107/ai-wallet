@@ -8,6 +8,11 @@ import { useWeeklySummary } from '../hooks/useWeeklySummary'
 import { useDailyCoachMessage } from '../hooks/UseDailyCoachMessage'
 import { useCoachProfile } from '../hooks/useCoachProfile'
 import { useStreak } from '../hooks/useStreak'
+import {
+  detectPatterns,
+  serializePatterns,
+  type FinancialPatterns,
+} from '../lib/financial-patterns'
 import WeeklySummaryCard from '../components/WeeklySummaryCard'
 import ChatUICard from './ChatUICard'
 import StreakBadge from './StreakBadge'
@@ -555,7 +560,8 @@ interface QuickAction {
 
 function getQuickActions(
   ctx: ReturnType<typeof buildFinancialContext> | null,
-  coachState: CoachState
+  coachState: CoachState,
+  patterns?: FinancialPatterns | null
 ): QuickAction[] {
   const hora = new Date().getHours()
   const esMañana = hora >= 6 && hora < 12
@@ -847,6 +853,26 @@ function getQuickActions(
         })
       }
 
+      if (patterns?.recurrentes && patterns.recurrentes.length > 0) {
+        actions.push({
+          id: 'recurrentes',
+          emoji: '🔄',
+          label: `${patterns.recurrentes.length} recurrentes`,
+          message: '¿Cuáles son mis gastos recurrentes este mes?',
+          color: 'border-white/10 bg-white/4',
+        })
+      }
+
+      if (patterns?.tendencia3Meses.direccion === 'aumentando') {
+        actions.push({
+          id: 'tendencia',
+          emoji: '📈',
+          label: 'Gastos subiendo',
+          message: '¿Por qué están subiendo mis gastos?',
+          color: 'border-[#FFD740]/20 bg-[#FFD740]/8',
+        })
+      }
+
       return actions
     }
   }
@@ -959,6 +985,7 @@ export default function ChatTab({
   const [ctx, setCtx] = useState<ReturnType<
     typeof buildFinancialContext
   > | null>(null)
+  const [patterns, setPatterns] = useState<FinancialPatterns | null>(null)
   const [accounts, setAccounts] = useState<Account[]>([])
   const [onboarding, setOnboarding] = useState<{
     nombre?: string
@@ -1252,21 +1279,23 @@ export default function ChatTab({
     weeklySummary.markShown(userId)
   }, [transactions, budgets, goals, userId])
 
-  // ── Contexto financiero ──
+  // ── Contexto financiero + patrones ──
   useEffect(() => {
     if (!transactions || !budgets || !goals) return
     const ob = {
       ingreso_mensual: onboarding.ingreso_mensual || 0,
       objetivo_ahorro: onboarding.objetivo_ahorro || 0,
     }
-    setCtx(
-      buildFinancialContext(
-        transactions,
-        budgets,
-        goals,
-        ob,
-        selectedMonth
-      )
+    const newCtx = buildFinancialContext(
+      transactions,
+      budgets,
+      goals,
+      ob,
+      selectedMonth
+    )
+    setCtx(newCtx)
+    setPatterns(
+      detectPatterns(transactions, selectedMonth, newCtx.ingresoEfectivo)
     )
   }, [
     transactions.length,
@@ -1458,8 +1487,9 @@ export default function ChatTab({
             }
           : null,
       perfil_coach: buildProfileContext(),
+      patrones: patterns ? serializePatterns(patterns) : null,
     }
-  }, [ctx, selectedMonth, transactions, onboarding, coachState, buildProfileContext])
+  }, [ctx, selectedMonth, transactions, onboarding, coachState, buildProfileContext, patterns])
 
   const addMessage = useCallback(
     (
@@ -1649,8 +1679,8 @@ export default function ChatTab({
   }
 
   const quickActions = useMemo(
-    () => getQuickActions(ctx, coachState),
-    [ctx, coachState]
+    () => getQuickActions(ctx, coachState, patterns),
+    [ctx, coachState, patterns]
   )
   const welcome = useMemo(
     () => getWelcome(ctx, coachState, accounts, onboarding.nombre, streakCount),
