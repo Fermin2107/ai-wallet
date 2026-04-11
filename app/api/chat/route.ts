@@ -178,7 +178,27 @@ EJEMPLOS DE CONFIRMACIONES BUENAS:
   Tarjeta + cuotas: "$45.000 en 3 cuotas anotado en Visa. Cada cuota: $15.000/mes. Esto sube tu deuda de tarjeta a $82.000."
   Budget crítico: "$3.200 en salidas. Atención: estás al 92% del límite en salidas — te quedan solo $800 hasta fin de mes."
 
-FORMATOS JSON:
+━━━ TRANSACCIONES MÚLTIPLES (CRÍTICO) ━━━━━━━━━━━━━━━━━━━━━━
+
+Si el usuario menciona 2 o más gastos/ingresos en un solo mensaje,
+usá INSERT_TRANSACTIONS_BATCH con un array "transactions".
+
+REGLAS BATCH:
+- Cada item del array tiene la misma estructura que un INSERT_TRANSACTION individual.
+- El mensaje_respuesta resume TODAS las transacciones en 2 líneas máximo.
+- Formato: total guardado + desglose rápido + dato de contexto.
+- Siempre usar la CUENTA RESUELTA del contexto para todas las transacciones del batch.
+
+EJEMPLOS que deben disparar BATCH:
+  "gasté 500 en el super, 200 en café y 1500 de nafta"
+  "hoy gasté en almuerzo 800, transporte 200 y después cine 1200"
+  "pagué 3000 de servicios y 1500 de suscripciones"
+  "compré ropa por 4000 y gasté 600 en lunch"
+
+FORMATO BATCH:
+{"action":"INSERT_TRANSACTIONS_BATCH","mensaje_respuesta":"3 gastos guardados por $2.200 total. Super $500, café $200, nafta $1.500. Te quedan $X para gastar hoy.","data":{"transactions":[{"description":"super","amount":500,"type":"gasto","category":"alimentacion","transaction_date":"YYYY-MM-DD","confirmed":true,"installment_count":1,"first_due_month":null,"account_id":"uuid-o-null"},{"description":"café","amount":200,"type":"gasto","category":"alimentacion","transaction_date":"YYYY-MM-DD","confirmed":true,"installment_count":1,"first_due_month":null,"account_id":"uuid-o-null"},{"description":"nafta","amount":1500,"type":"gasto","category":"transporte","transaction_date":"YYYY-MM-DD","confirmed":true,"installment_count":1,"first_due_month":null,"account_id":"uuid-o-null"}]}}
+
+FORMATOS JSON INDIVIDUAL:
 Gasto:   {"action":"INSERT_TRANSACTION","mensaje_respuesta":"confirmación según reglas","data":{"description":"texto","amount":numero,"type":"gasto","category":"categoria","transaction_date":"YYYY-MM-DD","confirmed":true,"installment_count":1,"first_due_month":"YYYY-MM","account_id":"uuid-o-null"}}
 Ingreso: {"action":"INSERT_TRANSACTION","mensaje_respuesta":"confirmación según reglas","data":{"description":"texto","amount":numero,"type":"ingreso","category":"ingreso","transaction_date":"YYYY-MM-DD","confirmed":true,"installment_count":1,"first_due_month":null,"account_id":"uuid-o-null"}}`;
 
@@ -315,7 +335,17 @@ function classifyIntent(message: string): BackendIntent {
   // Frases compuestas de registro sin verbo explícito
   const frasesRegistroDirecto = /\b(\d[\d.,]*k?\s*(pesos|peso|$|ars|de ahorro|en ahorro|de sueldo|de honorarios|de freelance|al super|en el super|de alquiler|de expensas|de servicios))\b/.test(msg);
 
+  // Múltiples montos en un mensaje → siempre registro (batch)
+  const multipleNumbers = (msg.match(/\d[\d.,]*k?/g) ?? []).length >= 2;
+  const hasComaSeparator = /\d[\d.,]*k?.*[,y].*\d[\d.,]*k?/.test(msg);
+
   if (hasNumber && (verbosGasto || verbosIngreso || frasesRegistroDirecto)) {
+    return 'registro';
+  }
+
+  // Mensaje con múltiples montos pero sin verbo explícito al inicio
+  // ej: "super 500, café 200, nafta 1500"
+  if (multipleNumbers && hasComaSeparator) {
     return 'registro';
   }
 
@@ -568,7 +598,7 @@ function getHistorySlice(
 
 function getMaxTokens(intent: BackendIntent): number {
   const limits: Record<BackendIntent, number> = {
-    registro: 180,
+    registro: 400,   // batch de hasta 5 transacciones necesita más tokens
     gestion_cuentas: 200,
     consulta_simple: 320,
     complejo: 800,
@@ -1117,6 +1147,24 @@ async function executeAction(
       return { success: true, message: 'Transacción guardada' };
     }
 
+    case 'INSERT_TRANSACTIONS_BATCH': {
+      // Groq devuelve { transactions: [...] }
+      const txArray = (data?.transactions ?? []) as TransactionPayload[];
+      if (!Array.isArray(txArray) || txArray.length === 0) {
+        throw new Error('Batch vacío o inválido');
+      }
+      await saveTransactionsToSupabase(
+        txArray,
+        originalMessage,
+        userId,
+        budgetsData,
+        goalsData,
+        userToken,
+        context
+      );
+      return { success: true, message: `${txArray.length} transacciones guardadas` };
+    }
+
     case 'CREATE_GOAL':
       await createGoalInSupabase(data as Record<string, unknown>, userId, userToken);
       return { success: true, message: 'Meta creada' };
@@ -1393,7 +1441,7 @@ export async function POST(request: NextRequest) {
         }
 
         // Enriquecer respuesta con nombre de cuenta para el frontend
-        if (aiResponse.action === 'INSERT_TRANSACTION' && serverResolvedAccountId) {
+        if ((aiResponse.action === 'INSERT_TRANSACTION' || aiResponse.action === 'INSERT_TRANSACTIONS_BATCH') && serverResolvedAccountId) {
           const resolvedAcc = accountsData.find(a => a.id === serverResolvedAccountId);
           if (resolvedAcc) {
             const enriched: Record<string, unknown> = {

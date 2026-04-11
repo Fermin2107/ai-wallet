@@ -135,6 +135,7 @@ export interface ChatRequest {
 export interface ChatResponse {
   action:
     | 'INSERT_TRANSACTION'
+    | 'INSERT_TRANSACTIONS_BATCH'
     | 'CREATE_GOAL'
     | 'UPDATE_GOAL_PROGRESS'
     | 'QUERY_BUDGET'
