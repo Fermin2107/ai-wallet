@@ -9,20 +9,15 @@ import {
 } from '../../../lib/supabase';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TOKEN BUDGET TABLE (monitoreá esto en producción)
+// TOKEN BUDGET TABLE
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// INTENT           | INPUT (antes) | INPUT (después) | OUTPUT (antes) | OUTPUT (después) | AHORRO INPUT
-// -----------------|---------------|-----------------|----------------|------------------|-------------
-// registro         |   ~3200 tok   |    ~450 tok     |   ~200 tok     |    ~100 tok      |   ↓86%
-// consulta_simple  |   ~3200 tok   |    ~800 tok     |   ~150 tok     |    ~200 tok      |   ↓75%
-// gestion_cuentas  |   ~3200 tok   |    ~550 tok     |   ~200 tok     |    ~150 tok      |   ↓83%
-// complejo         |   ~3800 tok   |   ~3200 tok     |   ~800 tok     |    ~700 tok      |   ↓16%
-//
-// DISTRIBUCIÓN REAL: 60% registro | 20% consulta | 10% cuentas | 10% complejo
-// AHORRO PONDERADO ESPERADO: ~75% reducción en tokens de input
-//
-// ─────────────────────────────────────────────────────────────────────────────
+// INTENT           | INPUT tokens | OUTPUT tokens
+// -----------------|--------------|--------------
+// registro         |   ~450 tok   |   ~120 tok
+// consulta_simple  |   ~800 tok   |   ~200 tok
+// gestion_cuentas  |   ~550 tok   |   ~150 tok
+// complejo         |  ~3200 tok   |   ~700 tok
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TIPOS
@@ -89,11 +84,9 @@ interface RequestContext {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SISTEMA DE PROMPTS — CAPAS SEPARADAS
+// SYSTEM PROMPTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ~400 tokens — se manda SIEMPRE. DEBE ser byte-idéntico entre requests para maximizar cache.
-// NO interpolar variables acá.
 const SYSTEM_PROMPT_BASE = `Sos el coach financiero personal del usuario en AI Wallet.
 
 ━━━ PERSONALIDAD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -104,7 +97,7 @@ Hablás en español rioplatense, directo, sin vueltas.
 TONO:
 - Máximo 3 oraciones por respuesta general. Para planes o análisis, podés extenderte.
 - Máximo 1 emoji por respuesta. Usalo con criterio, no como decoración.
-- Nunca empezás con "Claro", "Por supuesto", "Entendido", "¡Perfecto!" ni nada similar.
+- Nunca empezás con "Claro", "Por supuesto", "Entendido", "¡Perfecto!" ni similares.
 - Nunca hablás de vos mismo ni explicás lo que vas a hacer. Lo hacés y ya.
 - Nunca usás jerga financiera sin explicarla.
 - Arrancás siempre con la información, no con saludos.
@@ -137,7 +130,15 @@ Estructura obligatoria:
 
 Si no tenés data, usá "data": null. Nunca omitas las tres claves.`;
 
-// ~220 tokens — solo para intent 'registro'
+// ─── PROMPT REGISTRO ────────────────────────────────────────────────────────
+// El mensaje de confirmación DEBE:
+//   1. Mencionar la cuenta donde se guardó (nombre real, no "tu cuenta")
+//   2. Mencionar la categoría
+//   3. Dar un dato útil de contexto (cuánto queda en esa categoría, cuánto lleva gastado, etc)
+//   4. Terminar con UNA micro-acción concreta pero natural (no siempre pregunta)
+//   5. Variar el tono: a veces celebrar, a veces advertir, a veces solo confirmar
+//   6. Nunca ser genérico ni repetitivo
+
 const SYSTEM_PROMPT_REGISTRO = `
 ━━━ ROL: REGISTRAR GASTOS E INGRESOS ━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -147,22 +148,40 @@ FLUJO:
 - Fecha: usar FECHA del contexto salvo que el usuario diga otra.
 - Categoría: usar EXACTAMENTE los nombres de CATEGORÍAS DISPONIBLES del contexto.
 
-GASTOS INUSUALES (>3x promedio de la categoría): mencionarlo brevemente, sin drama.
+GASTOS INUSUALES (>2x promedio de la categoría): mencionarlo en la confirmación.
 
 CUOTAS (tarjeta de crédito):
 - installment_count = número de cuotas (1 si es pago único).
 - first_due_month = próximo mes de vencimiento en formato YYYY-MM.
-- Si el usuario paga con tarjeta y no mencionó cuotas: "¿En cuántas cuotas?"
+- Si el usuario paga con tarjeta y no mencionó cuotas: preguntar "¿En cuántas cuotas?"
 
 CUENTA:
 - Si hay CUENTA RESUELTA en el contexto → usarla SIEMPRE como account_id.
 - Si no hay cuentas → omitir account_id (es nullable).
 
-FORMATOS:
-Gasto:   {"action":"INSERT_TRANSACTION","mensaje_respuesta":"confirmación breve","data":{"description":"texto","amount":numero,"type":"gasto","category":"categoria","transaction_date":"YYYY-MM-DD","confirmed":true,"installment_count":1,"first_due_month":"YYYY-MM","account_id":"uuid-o-null"}}
-Ingreso: {"action":"INSERT_TRANSACTION","mensaje_respuesta":"confirmación breve","data":{"description":"texto","amount":numero,"type":"ingreso","category":"ingreso","transaction_date":"YYYY-MM-DD","confirmed":true,"installment_count":1,"first_due_month":null,"account_id":"uuid-o-null"}}`;
+━━━ CONFIRMACIÓN DE REGISTRO — REGLAS DE ORO ━━━━━━━━━━━━━━━━
 
-// ~150 tokens — solo para intent 'consulta_simple'
+El mensaje_respuesta de un INSERT_TRANSACTION DEBE tener esta estructura:
+  [confirmación del monto y qué fue] en [nombre exacto de la cuenta].
+  [dato útil de contexto: cuánto queda en la categoría, o cuánto lleva gastado en ella, o si está cerca del límite]
+  [micro-acción o dato forward-looking: qué debería gastar por día, si va bien, o si debe cuidar algo]
+
+VARIACIONES OBLIGATORIAS (no repetir el mismo patrón dos veces seguidas):
+- Si la categoría está al +80%: tono de advertencia suave
+- Si la categoría está bien: tono neutro/positivo con dato
+- Si es ingreso: celebración breve + dato de cuánto tiene disponible ahora
+- Si es gasto inusual (>2x promedio): mencionarlo una vez, sin drama
+
+EJEMPLOS DE CONFIRMACIONES BUENAS:
+  Gasto: "Listo, $1.500 de delivery en Mercado Pago. Llevás $4.200 en delivery este mes — al 70% del límite. Hoy te quedan $850 para gastar."
+  Ingreso: "Sueldo de $180.000 guardado en Galicia. Ahora tenés $162.000 libres después del ahorro. ¿Actualizamos las metas?"
+  Tarjeta + cuotas: "$45.000 en 3 cuotas anotado en Visa. Cada cuota: $15.000/mes. Esto sube tu deuda de tarjeta a $82.000."
+  Budget crítico: "$3.200 en salidas. Atención: estás al 92% del límite en salidas — te quedan solo $800 hasta fin de mes."
+
+FORMATOS JSON:
+Gasto:   {"action":"INSERT_TRANSACTION","mensaje_respuesta":"confirmación según reglas","data":{"description":"texto","amount":numero,"type":"gasto","category":"categoria","transaction_date":"YYYY-MM-DD","confirmed":true,"installment_count":1,"first_due_month":"YYYY-MM","account_id":"uuid-o-null"}}
+Ingreso: {"action":"INSERT_TRANSACTION","mensaje_respuesta":"confirmación según reglas","data":{"description":"texto","amount":numero,"type":"ingreso","category":"ingreso","transaction_date":"YYYY-MM-DD","confirmed":true,"installment_count":1,"first_due_month":null,"account_id":"uuid-o-null"}}`;
+
 const SYSTEM_PROMPT_CONSULTA = `
 ━━━ ROL: CONSULTAS CON NÚMEROS REALES ━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -187,7 +206,6 @@ FORMATO sin ui:
 FORMATO con ui (ejemplo):
 {"action":"RESPUESTA_CONSULTA","mensaje_respuesta":"Gastaste $X este mes...","data":null,"ui":{"type":"progress_bar","data":{}}}`;
 
-// ~220 tokens — solo para intent 'gestion_cuentas'
 const SYSTEM_PROMPT_GESTION_CUENTAS = `
 ━━━ ROL: GESTIÓN DE CUENTAS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -208,7 +226,6 @@ FORMATOS:
 Crear cuenta:    {"action":"CREATE_ACCOUNT","mensaje_respuesta":"Listo, agregué [nombre]. ¿Cuánto tenés ahí ahora?","data":{"name":"nombre","type":"liquid","balance":0,"icon":"emoji","color":"text-blue-400","set_as_default":false}}
 Actualizar saldo:{"action":"UPDATE_ACCOUNT_BALANCE","mensaje_respuesta":"Actualizado. Ahora tenés $X en [cuenta]. ¿Registramos algún movimiento?","data":{"account_name":"nombre","new_balance":numero}}`;
 
-// ~850 tokens — solo para intent 'complejo'
 const SYSTEM_PROMPT_COMPLEJO = `
 ━━━ ROL: OPTIMIZACIÓN DE GASTOS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -248,81 +265,84 @@ FORMATO:
 PROHIBIDO: "no tenés datos", "no puedo calcular".
 OBLIGATORIO: estimá con las heurísticas y dá el número concreto.
 
-━━━ UI HINTS (opcional — solo cuando agrega valor real) ━━━━━━
+━━━ UI HINTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Agregá "ui":{"type":"TIPO","data":{}} al JSON cuando aplique:
+Agregá "ui":{"type":"TIPO","data":{}} cuando aplique:
 - Análisis del mes / resumen / proyección → "progress_bar"
-- Análisis de categorías / top gastos / en qué gasté → "category_chips"
-- Respuesta sobre una meta específica / cómo van mis metas → "goal_card"
-- Alerta de presupuesto / categoría en riesgo / límites → "budget_alert"
+- Análisis de categorías / top gastos → "category_chips"
+- Respuesta sobre una meta específica → "goal_card"
+- Alerta de presupuesto / categoría en riesgo → "budget_alert"
 - Gasto diario / cuánto puedo gastar por día → "daily_limit"
-- Plan mensual generado (action PLAN_MENSUAL) → "plan_mensual"
-data siempre va vacío {}. El frontend lo completa con datos reales.
-Solo un ui por respuesta. No lo uses en registros ni en respuestas cortas.`;
+- Plan mensual generado → "plan_mensual"
+data siempre va vacío {}. Solo un ui por respuesta.`;
+
+const SYSTEM_PROMPT_PATRONES = `
+━━━ PATRONES DETECTADOS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Si el contexto incluye "patrones", usá esos datos para:
+- Mencionar el día de la semana donde más gasta (solo si factor_pico > 1.5)
+- Comentar si los gastos están subiendo o bajando vs el mes anterior (tendencia_mes)
+- Nombrar suscripciones/recurrentes detectadas si el usuario no las mencionó
+- Alertar sobre gastos hormiga solo si hormiga_significativo = true y hormiga_pct > 15
+
+REGLAS:
+- Usar MÁXIMO 1 patrón por respuesta. El más relevante para la pregunta.
+- Convertí los datos en una observación concreta y accionable.
+- Nunca enumeres patrones sin contexto.`;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PARTE 1 — classifyIntent
+// INTENT CLASSIFIER
+// ─────────────────────────────────────────────────────────────────────────────
+//
 // Orden de prioridad estricto:
 //   1. 'registro'         (número + verbo financiero → SIEMPRE gana)
 //   2. 'gestion_cuentas'
 //   3. 'consulta_simple'
 //   4. 'complejo'         (fallback seguro)
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Test cases internos (ejecutá con jest o vitest):
-// classifyIntent("gasté 1500 en café")           → 'registro'
-// classifyIntent("pagué 50000 de alquiler")       → 'registro'
-// classifyIntent("cobré el sueldo 200000")        → 'registro'
-// classifyIntent("en MP tengo 50000")             → 'gestion_cuentas'
-// classifyIntent("quiero agregar mi cuenta")      → 'gestion_cuentas'
-// classifyIntent("¿cuánto tengo?")                → 'gestion_cuentas'
-// classifyIntent("¿cómo voy este mes?")           → 'consulta_simple'
-// classifyIntent("¿cuánto puedo gastar hoy?")     → 'consulta_simple'
-// classifyIntent("haceme un plan para 3 meses")   → 'complejo'
-// classifyIntent("¿cómo puedo ahorrar más?")      → 'complejo'
-// classifyIntent("hola")                          → 'complejo' (fallback)
 
 function classifyIntent(message: string): BackendIntent {
   const msg = message.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
-  // ── 1. REGISTRO — número + verbo financiero (prioridad máxima) ──────────────
-  // Detectar presencia de número (incluyendo formatos: 1500, 1.500, 50k, 200000)
+  // ── 1. REGISTRO ──────────────────────────────────────────────────────────
   const hasNumber = /\b\d[\d.,]*k?\b/.test(msg);
 
-  const verbosGasto = /\b(gaste|pague|compre|salio|costo|puse|cargue|transferi|saque|abone|aboné|desembolse)\b/.test(msg);
-  const verbosIngreso = /\b(cobre|me pagaron|entraron|ingrese|recibi|deposite|deposité|acredita|acreditaron|cayo|cayó)\b/.test(msg);
+  // Verbos de gasto ampliados
+  const verbosGasto = /\b(gaste|pague|compre|salio|costo|puse|cargue|transferi|saque|abone|abono|abone|desembolse|gaste|pago|liquide|cancele|cancelo|mande|mando|debi|debit|cargo|cargaron|cobro|cobraron|pagan|pago|salieron|me costaron|me cobro|me cobraron|me debito|me cargo|me descontaron)\b/.test(msg);
 
-  if (hasNumber && (verbosGasto || verbosIngreso)) {
+  // Verbos de ingreso ampliados
+  const verbosIngreso = /\b(cobre|me pagaron|entraron|ingrese|recibi|deposite|acredita|acreditaron|cayo|me entro|me entraron|me deposito|me depositaron|me transfirieron|cobro|cobré el|cobré mi|me pagan|me depositan|llego|llego el|llego la)\b/.test(msg);
+
+  // Frases compuestas de registro sin verbo explícito
+  const frasesRegistroDirecto = /\b(\d[\d.,]*k?\s*(pesos|peso|$|ars|de ahorro|en ahorro|de sueldo|de honorarios|de freelance|al super|en el super|de alquiler|de expensas|de servicios))\b/.test(msg);
+
+  if (hasNumber && (verbosGasto || verbosIngreso || frasesRegistroDirecto)) {
     return 'registro';
   }
 
-  // ── 2. GESTION_CUENTAS ──────────────────────────────────────────────────────
+  // ── 2. GESTION_CUENTAS ────────────────────────────────────────────────────
   const patronesCuentas =
-    /\b(en mp|en mercado pago|en ual[aá]|en prex|en el banco|mi cuenta|mis cuentas|agregar cuenta|nueva cuenta|saldo|disponible)\b/.test(msg) ||
-    // número + preposición + nombre de wallet/banco
-    /\d[\d.,]*k?\s+(en|en el|en la)\s+(mp|mercado pago|ual[aá]|prex|banco|bbva|galicia|naranja|visa|mastercard|amex)\b/.test(msg) ||
-    // "¿cuánto tengo?"" sin verbo de gasto/ingreso
-    (/\b(cuanto tengo|cuanto hay|cuanta plata)\b/.test(msg) && !hasNumber);
+    /\b(en mp|en mercado pago|en ual[aá]|en prex|en el banco|mi cuenta|mis cuentas|agregar cuenta|nueva cuenta|saldo|disponible|actualizar cuenta)\b/.test(msg) ||
+    /\d[\d.,]*k?\s+(en|en el|en la)\s+(mp|mercado pago|ual[aá]|prex|banco|bbva|galicia|naranja|visa|mastercard|amex|brubank|uala|lemon|belo)\b/.test(msg) ||
+    (/\b(cuanto tengo|cuanto hay|cuanta plata|cuanto me queda en)\b/.test(msg) && !hasNumber);
 
   if (patronesCuentas) {
     return 'gestion_cuentas';
   }
 
-  // ── 3. CONSULTA_SIMPLE — evitar falsos positivos con 'complejo' ─────────────
-  const patronesConsulta = /\b(como voy|cuanto puedo|puedo comprar|puedo gastar|me alcanza para|cuanto gaste|resumen|estado del mes|en que gaste|donde gaste)\b/.test(msg);
-  const patronesComplejo = /\b(plan|planificar|proximos meses|ahorrar mas|reducir|distribuir|organizar|vacaciones|jubilacion|fondo de emergencia|emergencia|cobro irregular|invertir|inversion)\b/.test(msg);
+  // ── 3. CONSULTA_SIMPLE ────────────────────────────────────────────────────
+  const patronesConsulta = /\b(como voy|cuanto puedo|puedo comprar|puedo gastar|me alcanza para|cuanto gaste|resumen|estado del mes|en que gaste|donde gaste|cuanto llevo|cuanto me sobra|cuanto me falta|como estoy|como anda)\b/.test(msg);
+  const patronesComplejo = /\b(plan|planificar|proximos meses|ahorrar mas|reducir|distribuir|organizar|vacaciones|jubilacion|fondo de emergencia|emergencia|cobro irregular|invertir|inversion|como puedo mejorar|optimizar|recortar)\b/.test(msg);
 
   if (patronesConsulta && !patronesComplejo) {
     return 'consulta_simple';
   }
 
-  // ── 4. COMPLEJO — fallback seguro (nunca rompe ejecución) ──────────────────
+  // ── 4. COMPLEJO ───────────────────────────────────────────────────────────
   return 'complejo';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PARTE 2 — buildDynamicContext
-// Minimización extrema: cada intent recibe solo lo que necesita.
+// buildDynamicContext — mínimo por intent
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildDynamicContext(
@@ -340,31 +360,41 @@ function buildDynamicContext(
   const fecha = context.fecha_hoy ?? new Date().toISOString().split('T')[0];
   const usuario = context.nombre_usuario ?? 'no disponible';
 
-  // ── REGISTRO: mínimo absoluto (~300-400 tokens) ─────────────────────────────
-  // NO incluir: resumen_financiero, histórico, alertas, metas
+  // ── REGISTRO ─────────────────────────────────────────────────────────────
   if (intent === 'registro') {
     const categorias = context.budgets
-      ?.map((b) => `- "${b.categoria}"`)
+      ?.map((b) => `- "${b.categoria}" (gastado: $${b.gastado.toLocaleString('es-AR')} de $${b.limite.toLocaleString('es-AR')}, estado: ${b.estado})`)
       .join('\n') ?? 'Sin categorías configuradas';
 
+    // Cuenta resuelta con nombre visible para el mensaje de confirmación
     const cuentaResuelta = serverResolvedAccountId
-      ? `CUENTA RESUELTA: id ${serverResolvedAccountId} — usar como account_id`
-      : 'CUENTA RESUELTA: ninguna — account_id = null';
+      ? (() => {
+          const acc = accountsData.find(a => a.id === serverResolvedAccountId);
+          return acc
+            ? `CUENTA RESUELTA: "${acc.name}" (tipo: ${acc.type}, id: ${serverResolvedAccountId})`
+            : `CUENTA RESUELTA: id ${serverResolvedAccountId}`;
+        })()
+      : 'CUENTA RESUELTA: ninguna — account_id = null, NO menciones cuenta en la confirmación';
+
+    // Histórico de categorías para detectar gastos inusuales
+    const historicoCats = context.historico?.categorias
+      ?.map(c => `- "${c.categoria}": promedio $${c.promedio_mensual.toLocaleString('es-AR')}/mes`)
+      .join('\n') ?? '';
 
     return [
       `FECHA: ${fecha}`,
       `USUARIO: ${usuario}`,
       `MEDIO DE PAGO HABITUAL: ${context.medio_pago_habitual ?? 'no disponible'}`,
       ``,
-      `CATEGORÍAS DISPONIBLES (usá exactamente estos nombres):`,
+      `CATEGORÍAS DISPONIBLES (con estado actual del mes):`,
       categorias,
       ``,
       cuentaResuelta,
-    ].join('\n');
+      historicoCats ? `\nHISTÓRICO POR CATEGORÍA (para detectar gastos inusuales):\n${historicoCats}` : '',
+    ].filter(s => s !== undefined).join('\n');
   }
 
-  // ── GESTION_CUENTAS: cuentas + resumen (~400-500 tokens) ───────────────────
-  // NO incluir: resumen_financiero, histórico, metas
+  // ── GESTION_CUENTAS ────────────────────────────────────────────────────────
   if (intent === 'gestion_cuentas') {
     const listaCuentas = accountsData.length === 0
       ? 'Sin cuentas registradas.'
@@ -397,8 +427,7 @@ function buildDynamicContext(
     ].join('\n');
   }
 
-  // ── CONSULTA_SIMPLE: estado + alertas + budgets (~600-800 tokens) ───────────
-  // NO incluir: histórico de 3 meses, metas detalladas
+  // ── CONSULTA_SIMPLE ────────────────────────────────────────────────────────
   if (intent === 'consulta_simple') {
     const alertasStr = context.alertas && context.alertas.length > 0
       ? `ALERTAS:\n${context.alertas.map((a) => `- ${a}`).join('\n')}`
@@ -424,14 +453,14 @@ function buildDynamicContext(
     ].filter(Boolean).join('\n');
   }
 
-  // ── COMPLEJO: contexto completo (~2500-3500 tokens) ─────────────────────────
+  // ── COMPLEJO ───────────────────────────────────────────────────────────────
   const listaCuentasCompleta = accountsData.length === 0
     ? 'Sin cuentas — omitir account_id en transacciones.'
     : accountsData.map((a) => {
         const tag = a.is_default ? ' ← DEFAULT' : '';
         const isCredit = a.type === 'credit';
         const extra = isCredit
-          ? ` | deuda: $${Number(a.balance).toLocaleString('es-AR')} | límite: $${Number(a.credit_limit ?? 0).toLocaleString('es-AR')} | disponible tarjeta: $${Math.max(0, Number(a.credit_limit ?? 0) - Number(a.balance)).toLocaleString('es-AR')}`
+          ? ` | deuda: $${Number(a.balance).toLocaleString('es-AR')} | límite: $${Number(a.credit_limit ?? 0).toLocaleString('es-AR')} | disponible: $${Math.max(0, Number(a.credit_limit ?? 0) - Number(a.balance)).toLocaleString('es-AR')}`
           : ` | saldo: $${Number(a.balance).toLocaleString('es-AR')}`;
         const days = isCredit && (a.closing_day || a.due_day)
           ? ` | cierre: día ${a.closing_day ?? '?'}, vence: día ${a.due_day ?? '?'}`
@@ -460,10 +489,10 @@ function buildDynamicContext(
     `CUENTAS DEL USUARIO:`,
     listaCuentasCompleta,
     ``,
-    `CUENTA RESUELTA: ${serverResolvedAccountId ? `id ${serverResolvedAccountId} — usar como account_id` : 'ninguna — account_id = null'}`,
+    `CUENTA RESUELTA: ${serverResolvedAccountId ? `id ${serverResolvedAccountId}` : 'ninguna — account_id = null'}`,
     ``,
     context.perfil_coach ?? '',
-    context.perfil_coach ? `` : '',
+    ``,
     `RESUMEN DE CUENTAS:`,
     `  total_liquid: $${liquidBalance.toLocaleString('es-AR')}`,
     `  total_savings: $${savingsBalance.toLocaleString('es-AR')}`,
@@ -491,44 +520,17 @@ function buildDynamicContext(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-const SYSTEM_PROMPT_PATRONES = `
-━━━ PATRONES DETECTADOS (usar cuando el usuario pregunta por análisis) ━━━━━
-
-Si el contexto incluye "patrones", usá esos datos para:
-- Mencionar el día de la semana donde más gasta (solo si factor_pico > 1.5)
-- Comentar si los gastos están subiendo o bajando vs el mes anterior (tendencia_mes)
-- Nombrar suscripciones/recurrentes detectadas si el usuario no las mencionó
-- Alertar sobre gastos hormiga solo si hormiga_significativo = true y hormiga_pct > 15
-
-REGLAS DE USO DE PATRONES:
-- Usar MÁXIMO 1 patrón principal por respuesta. Elegí el más relevante para la pregunta.
-- Si pregunta "por qué no me alcanza" → priorizar dia_pico o tendencia_3_meses
-- Si pregunta "en qué gasto" → priorizar categorias_que_subieron o hormiga
-- Si pregunta "optimizar" → priorizar recurrentes o tendencia_mes
-
-EJEMPLOS DE USO CORRECTO:
-"¿por qué no me alcanza?" → "Los viernes gastás casi el doble que el resto de la semana. Ahí está buena parte del problema."
-"¿cómo voy este mes?" → "Estás un 18% arriba del mes pasado. Si seguís así, te va a faltar plata antes de fin de mes."
-"¿en qué puedo ajustar?" → "Tenés varios gastos chicos que parecen insignificantes pero suman el 22% de tu gasto mensual."
-
-Nunca menciones todos los patrones juntos. Nunca enumeres datos sin contexto.
-Convertí los datos en una observación concreta y accionable.`;
-
-// PARTE 3 — buildSystemPrompt
+// buildSystemPrompt — capas por intent
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildSystemPrompt(intent: BackendIntent): string {
-  // El BASE siempre va primero y es byte-idéntico → maximiza cache hit en Groq
   switch (intent) {
     case 'registro':
       return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_REGISTRO;
-
     case 'consulta_simple':
       return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_CONSULTA;
-
     case 'gestion_cuentas':
       return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_GESTION_CUENTAS;
-
     case 'complejo':
       return (
         SYSTEM_PROMPT_BASE +
@@ -542,7 +544,7 @@ function buildSystemPrompt(intent: BackendIntent): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PARTE 4 y 5 — Historial y max_tokens dinámicos por intent
+// Historial y max_tokens dinámicos
 // ─────────────────────────────────────────────────────────────────────────────
 
 function getHistorySlice(
@@ -550,7 +552,7 @@ function getHistorySlice(
   history: Array<{ role: string; content: string }>
 ): Array<{ role: 'user' | 'assistant'; content: string }> {
   const limits: Record<BackendIntent, number> = {
-    registro: 0,         // registros no necesitan contexto conversacional
+    registro: 2,          // 1 turno de contexto para ediciones
     gestion_cuentas: 2,
     consulta_simple: 2,
     complejo: 4,
@@ -566,16 +568,16 @@ function getHistorySlice(
 
 function getMaxTokens(intent: BackendIntent): number {
   const limits: Record<BackendIntent, number> = {
-    registro: 150,
+    registro: 180,
     gestion_cuentas: 200,
-    consulta_simple: 300,
+    consulta_simple: 320,
     complejo: 800,
   };
   return limits[intent];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TIPOS INTERNOS (sin any)
+// TIPOS INTERNOS
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface AccountRow {
@@ -611,7 +613,7 @@ interface GroqMessage {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Utilidades de estimación de tokens (1 token ≈ 4 chars en español)
+// Estimación de tokens
 // ─────────────────────────────────────────────────────────────────────────────
 
 function estimateTokens(text: string): number {
@@ -619,18 +621,15 @@ function estimateTokens(text: string): number {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// cleanAndParseAIResponse — blindaje del formato JSON
+// cleanAndParseAIResponse
 // ─────────────────────────────────────────────────────────────────────────────
 
 function cleanAndParseAIResponse(raw: string): ChatResponse {
-  // 1. Quitar markdown fences
   const mdMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
   const cleaned = mdMatch ? mdMatch[1].trim() : raw.trim();
 
-  // 2. Extraer primer objeto JSON completo
   const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
-    // Fallback seguro: empaquetar la respuesta como consulta
     return {
       action: 'RESPUESTA_CONSULTA',
       mensaje_respuesta: cleaned || 'No pude procesar la respuesta.',
@@ -658,7 +657,7 @@ function cleanAndParseAIResponse(raw: string): ChatResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Resto de helpers (sin cambios respecto al original)
+// saveTransactionsToSupabase
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function saveTransactionsToSupabase(
@@ -670,8 +669,6 @@ async function saveTransactionsToSupabase(
   userToken: string | null | undefined,
   context: RequestContext & { server_resolved_account_id?: string | null }
 ): Promise<void> {
-  console.log('💾 === GUARDANDO TRANSACCIONES EN SUPABASE ===');
-
   const supabase = userToken
     ? createSupabaseServerClientWithToken(userToken)
     : createSupabaseServerClient();
@@ -722,8 +719,6 @@ async function saveTransactionsToSupabase(
       };
     });
 
-    console.log('📝 Transacciones a insertar:', transactionsToInsert.length);
-
     const { data, error } = await supabase
       .from('transactions')
       .insert(
@@ -734,11 +729,8 @@ async function saveTransactionsToSupabase(
       .select();
 
     if (error) {
-      console.error('❌ Error insertando en Supabase:', error);
       throw handleSupabaseError(error);
     }
-
-    console.log('✅ Transacciones guardadas. IDs:', data?.map((t: { id: string }) => t.id));
 
     if (data && data.length > 0 && userId) {
       for (let idx = 0; idx < data.length; idx++) {
@@ -768,11 +760,9 @@ async function saveTransactionsToSupabase(
           firstDueMonth,
           supabase
         );
-        console.log(`✅ ${installCount} cuota(s) generadas para tx ${saved.id}`);
       }
     }
   } catch (error) {
-    console.error('💥 Error crítico guardando en Supabase:', error);
     throw error;
   }
 }
@@ -1113,8 +1103,6 @@ async function executeAction(
   userToken: string | null | undefined,
   context: RequestContext & { server_resolved_account_id?: string | null }
 ): Promise<ActionResult> {
-  console.log(`🚀 === EJECUTANDO ACCIÓN: ${action} ===`);
-
   switch (action) {
     case 'INSERT_TRANSACTION': {
       await saveTransactionsToSupabase(
@@ -1209,9 +1197,7 @@ async function executeAction(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST handler — pipeline:
-//   classifyIntent → buildDynamicContext → buildSystemPrompt
-//   → getHistorySlice → getMaxTokens → Groq → executeAction
+// POST handler
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
@@ -1222,8 +1208,6 @@ export async function POST(request: NextRequest) {
       history: Array<{ role: string; content: string }>;
     };
     const { message, context, history = [] } = body;
-
-    console.log('🔑 Authorization header:', request.headers.get('Authorization') ? 'PRESENTE' : 'AUSENTE');
 
     const authHeader = request.headers.get('Authorization');
     let userId: string | null = null;
@@ -1240,15 +1224,12 @@ export async function POST(request: NextRequest) {
           auth: { persistSession: false, autoRefreshToken: false },
         }
       );
-      const { data: { user }, error: userError } = await supabaseWithToken.auth.getUser();
-      console.log('👤 getUser:', user?.id ?? 'NULL', userError?.message ?? 'ok');
+      const { data: { user } } = await supabaseWithToken.auth.getUser();
       userId = user?.id ?? null;
       supabaseServer = supabaseWithToken;
     }
 
-    console.log('👤 User:', userId ?? 'NULL');
-
-    // ── Fetch de datos del usuario ────────────────────────────────────────────
+    // ── Fetch datos del usuario ────────────────────────────────────────────
     let budgetsData: BudgetRow[] = [];
     let goalsData: GoalRow[] = [];
     let accountsData: AccountRow[] = [];
@@ -1280,15 +1261,12 @@ export async function POST(request: NextRequest) {
         accountsData = (accountsRes.data ?? []) as AccountRow[];
         unpaidInstallmentsTotal = ((installmentsRes.data ?? []) as InstallmentRow[])
           .reduce((s, i) => s + Number(i.amount), 0);
-
-        console.log('💰 budgets:', budgetsData.length, '| 🏦 accounts:', accountsData.length);
       } catch (err) {
-        console.error('❌ Error fetching data:', err);
-        // Fallback seguro: continuar con arrays vacíos
+        console.error('Error fetching data:', err);
       }
     }
 
-    // ── Resolver cuenta server-side ───────────────────────────────────────────
+    // ── Resolver cuenta server-side ────────────────────────────────────────
     let serverResolvedAccountId: string | null = null;
     if (userId) {
       const { account_id, error: accError } = await resolveAccount(
@@ -1312,7 +1290,7 @@ export async function POST(request: NextRequest) {
       serverResolvedAccountId = account_id;
     }
 
-    // ── Calcular resúmenes de cuentas ─────────────────────────────────────────
+    // ── Calcular resúmenes de cuentas ──────────────────────────────────────
     const liquidBalance = accountsData
       .filter((a) => a.type === 'liquid')
       .reduce((s, a) => s + Number(a.balance), 0);
@@ -1333,14 +1311,10 @@ export async function POST(request: NextRequest) {
 
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // PIPELINE PRINCIPAL
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Pipeline principal ─────────────────────────────────────────────────
 
-    // 1. Clasificar intent (fallback seguro: 'complejo')
     const intent: BackendIntent = classifyIntent(message);
 
-    // 2. Construir contexto dinámico mínimo
     const dynamicContext = buildDynamicContext(
       intent,
       context,
@@ -1354,38 +1328,25 @@ export async function POST(request: NextRequest) {
       unpaidInstallmentsTotal
     );
 
-    // 3. Construir system prompt por capas
     const systemPrompt = buildSystemPrompt(intent);
-
-    // 4. Historial dinámico
     const historySlice = getHistorySlice(intent, history);
-
-    // 5. max_tokens dinámico
     const maxTokens = getMaxTokens(intent);
 
-    // ── Logging mejorado ──────────────────────────────────────────────────────
     const estimatedInputTokens =
       estimateTokens(systemPrompt) +
       estimateTokens(dynamicContext) +
       historySlice.reduce((s, m) => s + estimateTokens(m.content), 0) +
       estimateTokens(message);
 
-    console.log('📊 === OPTIMIZACIÓN DE TOKENS ===', {
-      intent_detected: intent,
-      estimated_input_tokens: estimatedInputTokens,
-      estimated_output_tokens: maxTokens,
-      system_prompt_length: systemPrompt.length,
-      context_length: dynamicContext.length,
-      history_length: historySlice.length,
+    console.log('📊 TOKENS:', {
+      intent,
+      estimated_input: estimatedInputTokens,
+      max_output: maxTokens,
     });
 
-    // 6. Construir mensajes para Groq
-    // NOTA: dos system messages separados para maximizar cache hit rate:
-    //   - El primero (systemPrompt) es cacheable: nunca tiene variables
-    //   - El segundo (dynamicContext) es variable: tiene los datos del usuario
     const messages: GroqMessage[] = [
-      { role: 'system', content: systemPrompt },        // cacheable por Groq
-      { role: 'system', content: dynamicContext },      // variable por request
+      { role: 'system', content: systemPrompt },
+      { role: 'system', content: dynamicContext },
       ...historySlice,
       { role: 'user', content: message },
     ];
@@ -1401,7 +1362,6 @@ export async function POST(request: NextRequest) {
       const rawContent = response.choices[0].message.content;
       if (!rawContent) throw new Error('No se recibió respuesta de Groq');
 
-      // Blindaje del formato: siempre devuelve ChatResponse válido
       const aiResponse: ChatResponse = cleanAndParseAIResponse(rawContent);
 
       try {
@@ -1426,15 +1386,33 @@ export async function POST(request: NextRequest) {
         }
 
         if (actionResult.data) {
-          aiResponse.data = { ...(aiResponse.data as Record<string, unknown> ?? {}), query_result: actionResult.data };
+          aiResponse.data = {
+            ...(aiResponse.data as Record<string, unknown> ?? {}),
+            query_result: actionResult.data,
+          };
         }
+
+        // Enriquecer respuesta con nombre de cuenta para el frontend
+        if (aiResponse.action === 'INSERT_TRANSACTION' && serverResolvedAccountId) {
+          const resolvedAcc = accountsData.find(a => a.id === serverResolvedAccountId);
+          if (resolvedAcc) {
+            const enriched: Record<string, unknown> = {
+              ...(aiResponse.data as Record<string, unknown> ?? {}),
+              _account_name: resolvedAcc.name,
+              _account_type: resolvedAcc.type,
+            };
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            aiResponse.data = enriched as any;
+          }
+        }
+
       } catch (actionError) {
-        console.error('💥 Error ejecutando acción:', actionError);
+        console.error('Error ejecutando acción:', actionError);
         return NextResponse.json(
           {
             action: 'ERROR',
             error: 'Error ejecutando la acción',
-            mensaje_respuesta: `❌ No pude ejecutar tu solicitud: ${actionError instanceof Error ? actionError.message : 'Error desconocido'}`,
+            mensaje_respuesta: `No pude ejecutar tu solicitud: ${actionError instanceof Error ? actionError.message : 'Error desconocido'}`,
           },
           { status: 500 }
         );
@@ -1442,18 +1420,18 @@ export async function POST(request: NextRequest) {
 
       return NextResponse.json(aiResponse);
     } catch (error) {
-      console.error('❌ Error en Groq:', error);
+      console.error('Error en Groq:', error);
       return NextResponse.json(
         {
           action: 'ERROR',
           error: 'Error procesando la solicitud',
-          mensaje_respuesta: '❌ Tuve problemas para entender tu mensaje. ¿Podés reformularlo?',
+          mensaje_respuesta: 'Tuve problemas para entender tu mensaje. ¿Podés reformularlo?',
         },
         { status: 500 }
       );
     }
   } catch (error) {
-    console.error('💥 Error en API de chat:', error);
+    console.error('Error en API de chat:', error);
     return NextResponse.json(
       {
         error: 'Error procesando la solicitud',
