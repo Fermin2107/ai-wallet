@@ -147,6 +147,16 @@ FLUJO:
 - Sin monto → una sola pregunta: "¿Cuánto fue?"
 - Fecha: usar FECHA del contexto salvo que el usuario diga otra.
 - Categoría: usar EXACTAMENTE los nombres de CATEGORÍAS DISPONIBLES del contexto.
+- amount: SIEMPRE positivo. NUNCA negativo.
+
+REINTEGROS, DEVOLUCIONES Y CASHBACK — REGLA CRÍTICA:
+Un reintegro NO es un ingreso. Es una reducción del gasto original.
+"Gasté X y me reintegraron Y" → registrar UN SOLO gasto de (X - Y), NO dos transacciones.
+"Me devolvieron X de algo que compré" → registrar UN SOLO gasto de (precio_original - X).
+"Me hicieron cashback de X" → registrar el gasto neto (precio - cashback).
+
+INGRESOS REALES (estos SÍ van como type "ingreso" separado):
+sueldo, salario, honorarios, freelance, venta de algo, alquiler cobrado, bono, aguinaldo.
 
 GASTOS INUSUALES (>2x promedio de la categoría): mencionarlo en la confirmación.
 
@@ -177,6 +187,7 @@ EJEMPLOS DE CONFIRMACIONES BUENAS:
   Ingreso: "Sueldo de $180.000 guardado en Galicia. Ahora tenés $162.000 libres después del ahorro. ¿Actualizamos las metas?"
   Tarjeta + cuotas: "$45.000 en 3 cuotas anotado en Visa. Cada cuota: $15.000/mes. Esto sube tu deuda de tarjeta a $82.000."
   Budget crítico: "$3.200 en salidas. Atención: estás al 92% del límite en salidas — te quedan solo $800 hasta fin de mes."
+  Reintegro: "Gasté $10.000 en el super y te reintegraron $5.000 — registré el neto: $5.000 en supermercado en Mercado Pago."
 
 ━━━ TRANSACCIONES MÚLTIPLES (CRÍTICO) ━━━━━━━━━━━━━━━━━━━━━━
 
@@ -655,35 +666,71 @@ function estimateTokens(text: string): number {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function cleanAndParseAIResponse(raw: string): ChatResponse {
+  // 1. Quitar markdown fences si las hay
   const mdMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
   const cleaned = mdMatch ? mdMatch[1].trim() : raw.trim();
 
+  // 2. Intentar parsear el JSON completo
   const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    return {
-      action: 'RESPUESTA_CONSULTA',
-      mensaje_respuesta: cleaned || 'No pude procesar la respuesta.',
-      data: {},
-    };
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]) as Partial<ChatResponse> & {
+        ui?: { type: string; data: Record<string, unknown> };
+      };
+      // Validar que tiene las claves mínimas
+      if (parsed.action && parsed.mensaje_respuesta !== undefined) {
+        return {
+          action: parsed.action ?? 'RESPUESTA_CONSULTA',
+          mensaje_respuesta: parsed.mensaje_respuesta ?? 'Procesé tu solicitud.',
+          data: parsed.data ?? {},
+          ...(parsed.ui ? { ui: parsed.ui } : {}),
+        } as ChatResponse;
+      }
+    } catch {
+      // Parse falló — intentar extracción quirúrgica
+    }
   }
 
-  try {
-    const parsed = JSON.parse(jsonMatch[0]) as Partial<ChatResponse> & {
-      ui?: { type: string; data: Record<string, unknown> };
-    };
+  // 3. Fallback quirúrgico: extraer action y mensaje_respuesta con regex
+  // Útil cuando el JSON es largo (batch) y tiene caracteres que rompen el parser
+  const actionMatch = cleaned.match(/"action"\s*:\s*"([^"]+)"/);
+  const mensajeMatch = cleaned.match(/"mensaje_respuesta"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+
+  if (actionMatch && mensajeMatch) {
+    const action = actionMatch[1];
+    const mensaje = mensajeMatch[1]
+      .replace(/\\n/g, '\n')
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, '\\');
+
+    // Para batch: intentar extraer el array de transactions del data
+    let data: Record<string, unknown> = {};
+    if (action === 'INSERT_TRANSACTIONS_BATCH') {
+      try {
+        // Buscar el array de transactions dentro del JSON roto
+        const txMatch = cleaned.match(/"transactions"\s*:\s*(\[[\s\S]*?\](?=\s*\}))/);
+        if (txMatch) {
+          data = { transactions: JSON.parse(txMatch[1]) };
+        }
+      } catch {
+        // Si no se puede extraer, data queda vacío — las tx no se guardan
+        // pero al menos el mensaje se muestra correctamente
+      }
+    }
+
     return {
-      action: parsed.action ?? 'RESPUESTA_CONSULTA',
-      mensaje_respuesta: parsed.mensaje_respuesta ?? 'Procesé tu solicitud.',
-      data: parsed.data ?? {},
-      ...(parsed.ui ? { ui: parsed.ui } : {}),
+      action: action as ChatResponse['action'],
+      mensaje_respuesta: mensaje,
+      data,
     } as ChatResponse;
-  } catch {
-    return {
-      action: 'RESPUESTA_CONSULTA',
-      mensaje_respuesta: cleaned || 'No pude procesar la respuesta.',
-      data: {},
-    };
   }
+
+  // 4. Último fallback: mostrar mensaje genérico, nunca el JSON crudo
+  return {
+    action: 'RESPUESTA_CONSULTA',
+    mensaje_respuesta: 'Procesé tu solicitud.',
+    data: {},
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -727,7 +774,7 @@ async function saveTransactionsToSupabase(
 
       return {
         description: tx.description ?? tx.descripcion ?? 'Sin descripción',
-        amount: Number(tx.amount ?? tx.monto) || 0,
+        amount: Math.abs(Number(tx.amount ?? tx.monto) || 0),  // constraint: amount > 0
         category: txCategory,
         type: (tx.type ?? tx.tipo ?? 'gasto') as 'gasto' | 'ingreso',
         transaction_date:
@@ -1441,7 +1488,7 @@ export async function POST(request: NextRequest) {
         }
 
         // Enriquecer respuesta con nombre de cuenta para el frontend
-        if ((aiResponse.action === 'INSERT_TRANSACTION' || aiResponse.action === 'INSERT_TRANSACTIONS_BATCH') && serverResolvedAccountId) {
+        if ((aiResponse.action === 'INSERT_TRANSACTION' || (aiResponse.action as string) === 'INSERT_TRANSACTIONS_BATCH') && serverResolvedAccountId) {
           const resolvedAcc = accountsData.find(a => a.id === serverResolvedAccountId);
           if (resolvedAcc) {
             const enriched: Record<string, unknown> = {

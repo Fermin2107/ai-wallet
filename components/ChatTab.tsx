@@ -1080,26 +1080,19 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
       const isRegistro = data.action === 'INSERT_TRANSACTION' || data.action === 'INSERT_TRANSACTIONS_BATCH'
 
       // Construir confirmData para la card editable
+      // Solo para transacciones individuales — el batch ya se resume en el mensaje del bot
       let confirmData: TransactionConfirmData | undefined
-      if (isRegistro && data.data) {
+      if (data.action === 'INSERT_TRANSACTION' && data.data) {
         const d = data.data as Record<string, unknown>
-        // Para batch, usar el primer item del array como representativo
-        const isBatch = data.action === 'INSERT_TRANSACTIONS_BATCH'
-        const txArr = isBatch ? (d.transactions as Record<string, unknown>[] | undefined) : null
-        const src = (txArr && txArr.length > 0) ? txArr[0] : d
         confirmData = {
-          amount: isBatch
-            ? (txArr ?? []).reduce((s: number, t: Record<string, unknown>) => s + (Number(t.amount) || 0), 0)
-            : Number(src.amount) || 0,
-          description: isBatch
-            ? `${txArr?.length ?? 0} gastos registrados`
-            : String(src.description || ''),
-          category: String(src.category || ''),
-          type: (src.type as 'gasto' | 'ingreso') || 'gasto',
+          amount: Number(d.amount) || 0,
+          description: String(d.description || ''),
+          category: String(d.category || ''),
+          type: (d.type as 'gasto' | 'ingreso') || 'gasto',
           account_name: d._account_name ? String(d._account_name) : undefined,
           account_type: d._account_type ? String(d._account_type) : undefined,
-          transaction_date: src.transaction_date ? String(src.transaction_date) : undefined,
-          installment_count: src.installment_count ? Number(src.installment_count) : undefined,
+          transaction_date: d.transaction_date ? String(d.transaction_date) : undefined,
+          installment_count: d.installment_count ? Number(d.installment_count) : undefined,
         }
       }
 
