@@ -690,9 +690,7 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
   const [showSuccessFlash, setShowSuccessFlash] = useState(false)
   const [pendingAccountMessage, setPendingAccountMessage] = useState<string | null>(null)
   const [accountPickerOptions, setAccountPickerOptions] = useState<{ id: string; name: string; type: string }[]>([])
-  const [proactiveShown, setProactiveShown] = useState(false)
-  const [noonShown, setNoonShown] = useState(false)
-  const [nightShown, setNightShown] = useState(false)
+
   const [dataLoaded, setDataLoaded] = useState(false)
 
   const [weeklySummaryData, setWeeklySummaryData] = useState<{
@@ -704,6 +702,7 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
 
   const weeklySummary = useWeeklySummary()
   const weeklySummaryInjected = useRef(false)
+  const proactiveAlreadyFired = useRef(false)
 
   const {
     shouldShowDaily, shouldShowNoon, shouldShowNight,
@@ -812,7 +811,7 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
     setConversationHistory([])
     setPendingAccountMessage(null)
     setAccountPickerOptions([])
-    setProactiveShown(false)
+    proactiveAlreadyFired.current = false
     setSidebarOpen(false)
   }, [])
 
@@ -873,89 +872,55 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
     setPatterns(detectPatterns(transactions, selectedMonth, newCtx.ingresoEfectivo))
   }, [transactions.length, budgets.length, goals.length, selectedMonth, onboarding]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Mensaje proactivo mañana ────────────────────────────────────────────────
+  // ── Mensaje proactivo — efecto único coordinado ────────────────────────────
+  // Ref-gated: se dispara una sola vez por sesión, sin depender de coachState estabilizado.
 
   useEffect(() => {
-    if (!ctx || !dataLoaded || !userId || isLoading) return
-    if (messages.length > 0 || proactiveShown) return
-    if (coachState === 'sin_cuentas' || coachState === 'sin_transacciones' || coachState === 'post_onboarding') return
-    if (!shouldShowDaily(userId)) return
+    if (!ctx || !dataLoaded || !userId) return
+    if (messages.length > 0) return
+    if (proactiveAlreadyFired.current) return
+    if (coachState === 'sin_cuentas' || coachState === 'post_onboarding') return
 
-    const dailyMsg = buildDailyMessage(ctx, onboarding.nombre, coachState)
-    if (!dailyMsg) return
+    let texto: string | null = null
+    let tipo: Message['type'] = 'normal'
+    let markShown: (() => void) | null = null
 
-    const timer = setTimeout(() => {
-      setMessages(prev => {
-        if (prev.length > 0) return prev
-        return [{ id: `daily-${Date.now()}`, text: dailyMsg, sender: 'ai', timestamp: new Date(), isAuto: true }]
-      })
-      markDailyShown(userId)
-      setProactiveShown(true)
-    }, 400)
-    return () => clearTimeout(timer)
+    if (!texto && shouldShowDaily(userId) && coachState !== 'sin_transacciones') {
+      const msg = buildDailyMessage(ctx, onboarding.nombre, coachState)
+      if (msg) { texto = msg; markShown = () => markDailyShown(userId) }
+    }
+    if (!texto && shouldShowNoon(userId)) {
+      const msg = buildNoonMessage(ctx, onboarding.nombre, coachState)
+      if (msg) { texto = msg; markShown = () => markNoonShown(userId) }
+    }
+    if (!texto && shouldShowNight(userId)) {
+      const msg = buildNightMessage(ctx, onboarding.nombre, coachState)
+      if (msg) { texto = msg; markShown = () => markNightShown(userId) }
+    }
+    if (!texto && patterns) {
+      const dia = new Date().getDay()
+      const diaNum = new Date().getDate()
+      if (dia === 1 || diaNum === 8) {
+        const msg = buildPatternInsight(ctx, onboarding.nombre)
+        if (msg) { texto = msg; tipo = 'insight' }
+      }
+    }
+
+    if (!texto) return
+
+    proactiveAlreadyFired.current = true
+    markShown?.()
+
+    setMessages([{
+      id: `proactive-${Date.now()}`,
+      text: texto,
+      sender: 'ai',
+      timestamp: new Date(),
+      isAuto: true,
+      type: tipo,
+    }])
+
   }, [ctx, dataLoaded, userId, coachState]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Mensaje proactivo mediodía ──────────────────────────────────────────────
-
-  useEffect(() => {
-    if (!ctx || !dataLoaded || !userId || isLoading || noonShown) return
-    if (!shouldShowNoon(userId)) return
-    if (coachState === 'sin_cuentas' || coachState === 'post_onboarding') return
-
-    const noonMsg = buildNoonMessage(ctx, onboarding.nombre, coachState)
-    if (!noonMsg) return
-
-    const timer = setTimeout(() => {
-      if (messages.length === 0) {
-        setMessages([{ id: `noon-${Date.now()}`, text: noonMsg, sender: 'ai', timestamp: new Date(), isAuto: true }])
-      }
-      markNoonShown(userId)
-      setNoonShown(true)
-    }, 600)
-    return () => clearTimeout(timer)
-  }, [ctx, dataLoaded, userId, coachState, noonShown]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Mensaje proactivo noche ─────────────────────────────────────────────────
-
-  useEffect(() => {
-    if (!ctx || !dataLoaded || !userId || isLoading || nightShown) return
-    if (!shouldShowNight(userId)) return
-    if (coachState === 'sin_cuentas' || coachState === 'post_onboarding') return
-
-    const nightMsg = buildNightMessage(ctx, onboarding.nombre, coachState)
-    if (!nightMsg) return
-
-    const timer = setTimeout(() => {
-      if (messages.length === 0) {
-        setMessages([{ id: `night-${Date.now()}`, text: nightMsg, sender: 'ai', timestamp: new Date(), isAuto: true }])
-      }
-      markNightShown(userId)
-      setNightShown(true)
-    }, 600)
-    return () => clearTimeout(timer)
-  }, [ctx, dataLoaded, userId, coachState, nightShown]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Pattern insight (lunes o día 8) ────────────────────────────────────────
-
-  useEffect(() => {
-    if (!ctx || !patterns || !dataLoaded || !userId) return
-    if (messages.length > 0 || proactiveShown) return
-    const dia = new Date().getDay()
-    const diaNum = new Date().getDate()
-    if (dia !== 1 && diaNum !== 8) return // Solo lunes o día 8
-
-    const insightMsg = buildPatternInsight(ctx, onboarding.nombre)
-    if (!insightMsg) return
-
-    const timer = setTimeout(() => {
-      setMessages(prev => {
-        if (prev.length > 0) return prev
-        return [{ id: `pattern-${Date.now()}`, text: insightMsg, sender: 'ai', timestamp: new Date(), isAuto: true, type: 'insight' }]
-      })
-      setProactiveShown(true)
-    }, 500)
-    return () => clearTimeout(timer)
-  }, [ctx, patterns, dataLoaded, userId, proactiveShown]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Scroll ──────────────────────────────────────────────────────────────────
 
@@ -1258,7 +1223,7 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
           </div>
         )}
 
-        {!loadingMessages && messages.length === 0 && (
+        {!loadingMessages && messages.length === 0 && dataLoaded && (
           <>
             <BotMessage text={welcome} />
             {ctx && coachState !== 'sin_cuentas' && coachState !== 'sin_transacciones' && ctx.totalGastado > 0 && (
