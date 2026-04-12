@@ -95,7 +95,7 @@ export default function GoalsTab({ selectedMonth: _selectedMonth, refreshTrigger
 
   useEffect(() => {
     if (refreshTrigger && refreshTrigger > 0) refresh();
-  }, [refreshTrigger]);
+  }, [refreshTrigger,refresh]);
 
   useEffect(() => {
     const load = async () => {

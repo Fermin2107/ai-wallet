@@ -85,7 +85,7 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
 
   useEffect(() => {
     if (refreshTrigger && refreshTrigger > 0) refresh()
-  }, [refreshTrigger])
+  }, [refreshTrigger,refresh])
 
   useEffect(() => {
     const load = async () => {

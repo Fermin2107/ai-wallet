@@ -13,6 +13,7 @@ import {
   serializePatterns,
   type FinancialPatterns,
 } from '../lib/financial-patterns'
+import { buildHistoricalContext, serializeHistoricalContext } from '../lib/historical-context'
 import WeeklySummaryCard from '../components/WeeklySummaryCard'
 import ChatUICard from './ChatUICard'
 import StreakBadge from './StreakBadge'
@@ -45,7 +46,7 @@ interface Message {
   isAuto?: boolean
   type?: 'normal' | 'success' | 'alert' | 'insight'
   ui?: { type: string; data: Record<string, unknown> }
-  confirmData?: TransactionConfirmData  // para la card editable
+  confirmData?: TransactionConfirmData
 }
 
 interface ChatSession {
@@ -183,18 +184,18 @@ function buildFinancialContext(
   })
 
   const alertas: string[] = []
-  const fmt = (n: number) => `$${Math.round(n).toLocaleString('es-AR')}`
+  const fmtLocal = (n: number) => `$${Math.round(n).toLocaleString('es-AR')}`
   if (!vaALlegar)
-    alertas.push(`A este ritmo te van a faltar ${fmt(Math.abs(superavit))} para llegar a fin de mes`)
+    alertas.push(`A este ritmo te van a faltar ${fmtLocal(Math.abs(superavit))} para llegar a fin de mes`)
   budgetAnalysis.filter((b) => b.percentUsed >= 85).forEach((b) => {
     alertas.push(
       b.status === 'excedido'
-        ? `Superaste el límite de ${b.category} en ${fmt(Math.abs(b.remaining))}`
+        ? `Superaste el límite de ${b.category} en ${fmtLocal(Math.abs(b.remaining))}`
         : `${b.category} está al ${b.percentUsed}% del límite`
     )
   })
   if (gastoDiarioPromedio > gastoDiarioRecomendado * 1.3 && gastoDiarioRecomendado > 0) {
-    alertas.push(`Gastás ${fmt(gastoDiarioPromedio)}/día pero deberías gastar ${fmt(gastoDiarioRecomendado)}/día`)
+    alertas.push(`Gastás ${fmtLocal(gastoDiarioPromedio)}/día pero deberías gastar ${fmtLocal(gastoDiarioRecomendado)}/día`)
   }
 
   const score = Math.max(0, Math.min(100,
@@ -207,20 +208,20 @@ function buildFinancialContext(
 
   const resumen = [
     `ESTADO: ${estado.toUpperCase()} (score ${score}/100)`,
-    `INGRESO: ${fmt(ingresoEfectivo)} | GASTADO: ${fmt(totalGastado)} | LIBRE: ${fmt(dineroLibre)} | AHORRO OBJETIVO: ${fmt(objetivoAhorro)}`,
-    `DÍAS RESTANTES: ${diasRestantes} | GASTO DIARIO REAL: ${fmt(gastoDiarioPromedio)}/día | RECOMENDADO: ${fmt(gastoDiarioRecomendado)}/día`,
-    `PROYECCIÓN FIN DE MES: ${vaALlegar ? 'LLEGA' : 'NO LLEGA'} (superávit proyectado: ${fmt(superavit)})`,
+    `INGRESO: ${fmtLocal(ingresoEfectivo)} | GASTADO: ${fmtLocal(totalGastado)} | LIBRE: ${fmtLocal(dineroLibre)} | AHORRO OBJETIVO: ${fmtLocal(objetivoAhorro)}`,
+    `DÍAS RESTANTES: ${diasRestantes} | GASTO DIARIO REAL: ${fmtLocal(gastoDiarioPromedio)}/día | RECOMENDADO: ${fmtLocal(gastoDiarioRecomendado)}/día`,
+    `PROYECCIÓN FIN DE MES: ${vaALlegar ? 'LLEGA' : 'NO LLEGA'} (superávit proyectado: ${fmtLocal(superavit)})`,
     '',
     'PRESUPUESTOS:',
-    ...budgetAnalysis.map((b) => `  [${b.status.toUpperCase()}] ${b.category}: gastó ${fmt(b.spent)} de ${fmt(b.limit)} (${b.percentUsed}%)${b.willExceed ? ' — VA A EXCEDER' : ''}`),
+    ...budgetAnalysis.map((b) => `  [${b.status.toUpperCase()}] ${b.category}: gastó ${fmtLocal(b.spent)} de ${fmtLocal(b.limit)} (${b.percentUsed}%)${b.willExceed ? ' — VA A EXCEDER' : ''}`),
     budgetAnalysis.length === 0 ? '  Sin presupuestos configurados' : '',
     '',
     'METAS:',
-    ...goalAnalysis.map((g) => `  ${g.name}: ${fmt(g.current)} de ${fmt(g.target)} (${g.percentComplete}%)${g.monthsToComplete ? ` — ~${g.monthsToComplete} meses` : ''}`),
+    ...goalAnalysis.map((g) => `  ${g.name}: ${fmtLocal(g.current)} de ${fmtLocal(g.target)} (${g.percentComplete}%)${g.monthsToComplete ? ` — ~${g.monthsToComplete} meses` : ''}`),
     goalAnalysis.length === 0 ? '  Sin metas activas' : '',
     '',
     'TOP GASTOS DEL MES:',
-    ...topGastos.map((c) => `  ${c.category}: ${fmt(c.total)}`),
+    ...topGastos.map((c) => `  ${c.category}: ${fmtLocal(c.total)}`),
     topGastos.length === 0 ? '  Sin gastos registrados este mes' : '',
     alertas.length > 0 ? '\nALERTAS:\n' + alertas.map((a) => `  ⚠️ ${a}`).join('\n') : '',
   ].join('\n')
@@ -526,7 +527,6 @@ function formatSessionDate(iso: string): string {
 const ACCIONES_QUE_MODIFICAN = ['INSERT_TRANSACTION', 'INSERT_TRANSACTIONS_BATCH', 'CREATE_GOAL', 'CREATE_BUDGET', 'UPDATE_GOAL_PROGRESS']
 
 // ─── TransactionConfirmCard ───────────────────────────────────────────────────
-// Card editable que aparece después de cada registro.
 
 interface TransactionConfirmCardProps {
   data: TransactionConfirmData
@@ -564,7 +564,6 @@ function TransactionConfirmCard({ data, onConfirm, onSkip }: TransactionConfirmC
 
   return (
     <div className="mt-2 rounded-2xl border border-white/10 bg-[#0D1410] overflow-hidden">
-      {/* Header */}
       <div className="flex items-center justify-between px-3 py-2.5 border-b border-white/5">
         <div className="flex items-center gap-2">
           <span className="text-lg leading-none">{emoji}</span>
@@ -585,7 +584,6 @@ function TransactionConfirmCard({ data, onConfirm, onSkip }: TransactionConfirmC
         )}
       </div>
 
-      {/* Edición inline */}
       {editing ? (
         <div className="px-3 py-2.5 space-y-2">
           <div>
@@ -635,7 +633,6 @@ function TransactionConfirmCard({ data, onConfirm, onSkip }: TransactionConfirmC
         </div>
       )}
 
-      {/* Acciones */}
       {!editing && (
         <div className="flex border-t border-white/5">
           <button
@@ -872,8 +869,7 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
     setPatterns(detectPatterns(transactions, selectedMonth, newCtx.ingresoEfectivo))
   }, [transactions.length, budgets.length, goals.length, selectedMonth, onboarding]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Mensaje proactivo — efecto único coordinado ────────────────────────────
-  // Ref-gated: se dispara una sola vez por sesión, sin depender de coachState estabilizado.
+  // ── Mensaje proactivo ───────────────────────────────────────────────────────
 
   useEffect(() => {
     if (!ctx || !dataLoaded || !userId) return
@@ -926,10 +922,11 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
-  // ── Contexto backend ────────────────────────────────────────────────────────
+  // ── buildBackendContext (MEJORADO — incluye histórico completo) ─────────────
 
   const buildBackendContext = useCallback(() => {
     if (!ctx) return {}
+
     const hoy = new Date()
     const hace3Meses = new Date(hoy.getFullYear(), hoy.getMonth() - 3, 1).toISOString().slice(0, 7)
     const txHistorico = transactions.filter(t => {
@@ -958,6 +955,14 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
     }))
     const gastoMinimoMensual = categoriasClasificadas.filter(c => c.tipo === 'esencial').reduce((s, c) => s + c.promedio_mensual, 0)
 
+    // ── NUEVO: Contexto histórico completo ───────────────────────────────────
+    const historicalCtx = buildHistoricalContext(
+      transactions,
+      selectedMonth,
+      onboarding.objetivo_ahorro || 0
+    )
+    const historico_completo = serializeHistoricalContext(historicalCtx)
+
     return {
       nombre_usuario: onboarding.nombre || null,
       medio_pago_habitual: null,
@@ -977,6 +982,29 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
       historico: mesesConDatos.length > 0 ? { meses_analizados: cantMeses, gasto_mensual_promedio: Math.round(gastoMensualPromedio), gasto_minimo_mensual: Math.round(gastoMinimoMensual), categorias: categoriasClasificadas } : null,
       perfil_coach: buildProfileContext(),
       patrones: patterns ? serializePatterns(patterns) : null,
+
+      // ── DATOS HISTÓRICOS RICOS (NUEVOS) ──────────────────────────────────
+      historico_completo,
+      simulaciones: historicalCtx.simulaciones.map(s => ({
+        categoria: s.categoria,
+        gastoMensualActual: s.gastoMensualActual,
+        ahorroMensual: s.ahorroMensual,
+        ahorro6Meses: s.ahorro6Meses,
+        ahorro12Meses: s.ahorro12Meses,
+      })),
+      ultimas_transacciones: historicalCtx.ultimasTransacciones,
+      gasto_por_semana_promedio: historicalCtx.gastoPorSemanaPromedio,
+      comparativa_semana: {
+        promedioLunesViernes: historicalCtx.comparativaSemana.promedioLunesViernes,
+        promedioSabadoDomingo: historicalCtx.comparativaSemana.promedioSabadoDomingo,
+        factorFinDeSemana: historicalCtx.comparativaSemana.factorFinDeSemana,
+      },
+      dias_sin_gastar_en: historicalCtx.diasSinGastarEn,
+      gasto_anual_por_categoria: historicalCtx.gastoAnualPorCategoria,
+      mes_mas_caro: historicalCtx.mesMasCaro
+        ? { mes: historicalCtx.mesMasCaro.mes, total: historicalCtx.mesMasCaro.gastos }
+        : null,
+      cumplimiento_ahorro: historicalCtx.cumplimientoAhorro,
     }
   }, [ctx, selectedMonth, transactions, onboarding, coachState, buildProfileContext, patterns])
 
@@ -1006,7 +1034,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
     try {
       const intent = detectIntent(message)
 
-      // Respuesta auto para consultas simples sin cuenta picker
       if (intent === 'consulta_simple' && ctx && !overrideAccountId && coachState !== 'sin_cuentas' && coachState !== 'sin_transacciones') {
         const auto = autoRespond(message, ctx, onboarding.nombre)
         if (auto) {
@@ -1026,7 +1053,7 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(token && { Authorization: `Bearer ${token}` }) },
-        body: JSON.stringify({ message, context: contexto, history: conversationHistory.slice(-6) }),
+        body: JSON.stringify({ message, context: contexto, history: conversationHistory.slice(-8) }),
       })
 
       if (!response.ok) throw new Error('Error en el servidor')
@@ -1044,8 +1071,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
       const aiText = data.mensaje_respuesta || 'No pude procesar tu mensaje'
       const isRegistro = data.action === 'INSERT_TRANSACTION' || data.action === 'INSERT_TRANSACTIONS_BATCH'
 
-      // Construir confirmData para la card editable
-      // Solo para transacciones individuales — el batch ya se resume en el mensaje del bot
       let confirmData: TransactionConfirmData | undefined
       if (data.action === 'INSERT_TRANSACTION' && data.data) {
         const d = data.data as Record<string, unknown>
@@ -1061,7 +1086,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
         }
       }
 
-      // UI card
       let uiCard: Message['ui'] | undefined
       if (data.ui?.type && ctx) {
         uiCard = { type: data.ui.type, data: enrichUIData(data.ui.type, ctx, data.data as Record<string, unknown> | undefined) }
@@ -1080,7 +1104,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
       setMessages(prev => [...prev, newMsg])
       if (sessionId) await persistMessage(sessionId, 'assistant', aiText)
 
-      // Fire-and-forget: extrae info personal
       if (/quiero|objetivo|meta|ahorrar para|cobro el|me pagan|trabajo|no puedo|restricci|siempre|nunca|cuotas fijas|en negro|dólares|dolares/i.test(message)) {
         extractAndUpdateProfile(message, updateProfile)
       }
@@ -1123,7 +1146,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
   return (
     <div className="flex flex-col h-[calc(100vh-160px)] min-h-[500px] bg-[#0A0F0D] relative">
 
-      {/* Flash de éxito */}
       {showSuccessFlash && (
         <div className="absolute inset-0 pointer-events-none z-50 flex items-center justify-center">
           <div className="flex items-center gap-2 bg-[#00C853] text-black text-sm font-bold px-5 py-2.5 rounded-full shadow-lg animate-bounce">
@@ -1132,7 +1154,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
         </div>
       )}
 
-      {/* Sidebar */}
       {sidebarOpen && (
         <>
           <div className="fixed inset-0 z-40 bg-black/60" onClick={() => setSidebarOpen(false)} />
@@ -1177,7 +1198,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
         </>
       )}
 
-      {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-white/5 flex-shrink-0">
         <div className="flex items-center gap-3">
           <button onClick={() => setSidebarOpen(true)} className="text-white/30 hover:text-white/60 transition-colors p-1">
@@ -1203,7 +1223,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
         </div>
       </div>
 
-      {/* WeeklySummaryCard */}
       {showWeeklyCard && weeklySummaryData && (
         <WeeklySummaryCard
           data={weeklySummaryData}
@@ -1215,7 +1234,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
         />
       )}
 
-      {/* Mensajes */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {loadingMessages && (
           <div className="flex justify-center py-8">
@@ -1254,23 +1272,19 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
                     <p className="text-white text-sm leading-relaxed">{msg.text}</p>
                   </div>
 
-                  {/* Card editable de confirmación */}
                   {msg.confirmData && ctx && (
                     <TransactionConfirmCard
                       data={msg.confirmData}
                       onConfirm={(_edited) => {
-                        // Si editó, actualizar y refrescar
                         refresh()
                         onDataChanged?.()
                       }}
                       onSkip={() => {
-                        // Quitar la card del mensaje sin hacer nada
                         setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, confirmData: undefined } : m))
                       }}
                     />
                   )}
 
-                  {/* UI Card (progress bar, category chips, etc) */}
                   {msg.ui && <ChatUICard type={msg.ui.type} data={msg.ui.data} />}
 
                   {msg.isAuto && (
@@ -1297,7 +1311,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Account picker */}
       {accountPickerOptions.length > 0 && (
         <div className="px-4 pb-1 flex-shrink-0">
           <p className="text-white/30 text-xs mb-1.5">Elegí la cuenta:</p>
@@ -1320,7 +1333,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
         </div>
       )}
 
-      {/* Quick Actions */}
       {accountPickerOptions.length === 0 && showQuickActions && quickActions.length > 0 && (
         <div className="px-4 pb-2 flex-shrink-0">
           <div className="flex gap-2 overflow-x-auto scrollbar-none">
@@ -1338,7 +1350,6 @@ export default function ChatTab({ selectedMonth, onDataChanged, onNavigateToBudg
         </div>
       )}
 
-      {/* Input */}
       <div className="p-4 border-t border-white/5 flex-shrink-0">
         <div className="flex gap-2">
           <input
