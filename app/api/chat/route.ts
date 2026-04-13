@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
 import { ChatResponse } from '../../../lib/types';
+import { resolveCategory } from '../../../lib/category-aliases';
 import {
   createSupabaseServerClient,
   createSupabaseServerClientWithToken,
@@ -547,7 +548,6 @@ progress_bar / category_chips / goal_card / budget_alert / daily_limit / plan_me
 function classifyIntent(message: string): BackendIntent {
   const msg = message.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
-  // ── 1. REGISTRO ──────────────────────────────────────────────────────────
   const hasNumber = /\b\d[\d.,]*k?\b/.test(msg);
   const verbosGasto = /\b(gaste|pague|compre|salio|costo|puse|cargue|transferi|saque|abone|desembolse|pago|liquide|cancele|mande|debi|cargo|cargaron|cobro|salieron|me costaron|me cobro|me cobraron|me debito|me cargo|me descontaron)\b/.test(msg);
   const verbosIngreso = /\b(cobre|me pagaron|entraron|ingrese|recibi|deposite|acredita|acreditaron|cayo|me entro|me entraron|me deposito|me depositaron|me transfirieron|cobro el|cobré mi)\b/.test(msg);
@@ -556,76 +556,54 @@ function classifyIntent(message: string): BackendIntent {
   const hasComaSeparator = /\d[\d.,]*k?.*[,y].*\d[\d.,]*k?/.test(msg);
   const deudaInformal = /\b(le debo|me deben|me presto|le preste|me devolvio|le devolvi)\b/.test(msg);
 
-  if (hasNumber && (verbosGasto || verbosIngreso || frasesRegistroDirecto || deudaInformal)) {
-    return 'registro';
-  }
-  if (multipleNumbers && hasComaSeparator) {
-    return 'registro';
-  }
+  if (hasNumber && (verbosGasto || verbosIngreso || frasesRegistroDirecto || deudaInformal)) return 'registro';
+  if (multipleNumbers && hasComaSeparator) return 'registro';
 
-  // ── 2. SIMULACIÓN ─────────────────────────────────────────────────────────
   const patronesSimulacion = /\b(si (dejo|bajo|reduzco|corto|recorto|elimino|paro)|cuanto (ahorraria|ahorro si|me sobraria|me sobra si)|que pasaria si|si (recorto|gasto menos)|podria ahorrar|si no (pido|compro|gasto|salgo)|en cuanto tiempo|cuantos meses para|me alcanza para|puedo pagar el|puedo afrontar|si me aumentan|me aumentaron|distribuir el aumento|como distribuyo|pongo en la meta o|los guardo o)\b/.test(msg);
-
   if (patronesSimulacion) return 'simulacion';
 
-  // ── 3. CONSULTA HISTÓRICA ─────────────────────────────────────────────────
   const patronesHistoricos = /\b(este (año|anio)|en el año|historico|acumulado|desde (enero|el año)|cuanto (llevo|gaste en|gasté en|gastaste)|mes mas caro|mes (más|mas) caro|mis ultimos|últimos (gastos|movimientos|5|10)|ultimas (transacciones|operaciones)|semana vs fin|fin de semana|mas los (sabados|fines)|dias sin|hace cuanto|cuando fue la ultima|cuanto llevo (sin|gastando)|vengo cumpliendo|meses (cumpli|ahorre|ahorré)|por semana (en promedio|cuanto)|promedio (semanal|por semana)|en total (este|el) (año|anio)|cuanto (subi|baje|cambio) (mis|los|en)|comparado con el (mes|anterior|anio)|gaste mas|gaste menos|subi o baje)\b/.test(msg);
-
   if (patronesHistoricos) return 'consulta_historica';
 
-  // ── NUEVOS: IDENTIDAD FINANCIERA ──────────────────────────────────────────
   const patronesIdentidad = /\b(soy bueno ahorrando|soy gastador|como soy con la plata|mi perfil financiero|como me ves financieramente|soy ordenado|tengo buena relacion con la plata)\b/.test(msg);
   if (patronesIdentidad) return 'consulta_historica';
 
-  // ── NUEVOS: SEGURIDAD / FONDO DE EMERGENCIA ───────────────────────────────
   const patronesSeguridad = /\b(si me quedo sin trabajo|cuanto tiempo aguanto|fondo de emergencia|vivir sin trabajar|cuantos meses aguanto|sin ingresos cuanto|me quedo sin laburo|pierdo el trabajo)\b/.test(msg);
   if (patronesSeguridad) return 'simulacion';
 
-  // ── NUEVOS: BENCHMARK / COMPARACIÓN CON REGLAS ────────────────────────────
   const patronesBenchmark = /\b(comparado con|como estoy vs|deberia tener|regla del|50.?30.?20|tres sueldos|seis sueldos|fondo recomendado|estoy bien financieramente|estoy mal financieramente)\b/.test(msg);
   if (patronesBenchmark) return 'complejo';
 
-  // ── NUEVOS: DÍA PICO / ANÁLISIS POR DÍA ──────────────────────────────────
   const patronesDiaPico = /\b(que dia gasto mas|dia (que )?mas (gasto|gaste)|dia pico|gasto (mas )?los (lunes|martes|miercoles|jueves|viernes|sabados?|domingos?))\b/.test(msg);
   if (patronesDiaPico) return 'consulta_historica';
 
-  // ── NUEVOS: CUOTAS VS CONTADO ─────────────────────────────────────────────
   const patronesCuotas = /\b(me conviene (pagar en )?cuotas|cuotas o contado|conviene financiar|en cuantas cuotas conviene|pago (de )?contado o cuotas)\b/.test(msg);
   if (patronesCuotas) return 'simulacion';
 
-  // ── NUEVOS: GASTO ANUAL TOTAL ─────────────────────────────────────────────
   const patronesAnual = /\b(gaste en total (este )?a[ñn]o|cuanto gaste este a[ñn]o|total del a[ñn]o|resumen anual|balance anual|mi año en numeros)\b/.test(msg);
   if (patronesAnual) return 'consulta_historica';
 
-  // ── NUEVOS: BIENESTAR / VACACIONES ────────────────────────────────────────
   const patronesBienestar = /\b(cuando puedo (tomarme )?vacaciones|cuando puedo dejar de trabajar|me puedo dar el lujo|me lo puedo permitir|puedo dejar el trabajo|sabbatical|cuando me jubilo|plata para vivir sin trabajar)\b/.test(msg);
   if (patronesBienestar) return 'simulacion';
 
-  // ── NUEVOS: SALUD FINANCIERA GENERAL ─────────────────────────────────────
   const patronesSaludFinanciera = /\b(estoy gastando bien|gasto en lo correcto|distribucion (de )?mis gastos|como deberia gastar|como deberia distribuir|en que deberia gastar mas|en que deberia gastar menos)\b/.test(msg);
   if (patronesSaludFinanciera) return 'complejo';
 
-  // ── NUEVOS: DEUDA INFORMAL CON NÚMERO ────────────────────────────────────
   const deudaConNumero = /\b(le debo|me deben|me debe|le debe)\b/.test(msg);
   if (deudaConNumero && hasNumber) return 'registro';
 
-  // ── 4. PLANIFICACIÓN ─────────────────────────────────────────────────────
   const patronesPlanificacion = /\b(plan|planificar|proximos meses|ahorrar para|como distribuyo|organizar|quiero irme|viaje en|vacaciones en|fondo de emergencia|invertir|optimizar presupuesto|como llego a|en cuanto tiempo llego a|cuando puedo comprar|cuando podria tener)\b/.test(msg);
   if (patronesPlanificacion) return 'planificacion';
 
-  // ── 5. GESTION_CUENTAS ────────────────────────────────────────────────────
   const patronesCuentas =
     /\b(en mp|en mercado pago|en ual[aá]|en prex|en el banco|mi cuenta|mis cuentas|agregar cuenta|nueva cuenta|saldo|disponible|actualizar cuenta)\b/.test(msg) ||
     /\d[\d.,]*k?\s+(en|en el|en la)\s+(mp|mercado pago|ual[aá]|prex|banco|bbva|galicia|naranja|visa|mastercard|amex|brubank|uala|lemon|belo)\b/.test(msg) ||
     (/\b(cuanto tengo|cuanto hay|cuanta plata|cuanto me queda en)\b/.test(msg) && !hasNumber);
-
   if (patronesCuentas) return 'gestion_cuentas';
 
-  // ── 6. CONSULTA SIMPLE ────────────────────────────────────────────────────
   const patronesConsulta = /\b(como voy|cuanto puedo|puedo comprar|puedo gastar|me alcanza para|cuanto gaste|resumen|estado del mes|en que gaste|donde gaste|cuanto llevo|cuanto me sobra|cuanto me falta|como estoy|como anda|cuanto queda en|cuanto me queda en)\b/.test(msg);
   if (patronesConsulta) return 'consulta_simple';
 
-  // ── 7. COMPLEJO ───────────────────────────────────────────────────────────
   return 'complejo';
 }
 
@@ -651,9 +629,16 @@ function buildDynamicContext(
   const estadoBase = `ESTADO: ${context.estado_mes ?? 'sin datos'} | libre: $${(context.dinero_libre ?? 0).toLocaleString('es-AR')} | por día: $${(context.gasto_diario_recomendado ?? 0).toLocaleString('es-AR')} | días restantes: ${context.dias_restantes ?? 0}`;
 
   if (intent === 'registro') {
-    const categorias = context.budgets
-      ?.map((b) => `- "${b.categoria}" (gastado: $${b.gastado.toLocaleString('es-AR')} de $${b.limite.toLocaleString('es-AR')}, estado: ${b.estado})`)
-      .join('\n') ?? 'Sin categorías configuradas';
+    const userCategoryNames = context.budgets?.map(b => `"${b.categoria}"`).join(', ') ?? '';
+
+    const categorias = (
+      context.budgets
+        ?.map((b) => `- "${b.categoria}" (gastado: $${b.gastado.toLocaleString('es-AR')} de $${b.limite.toLocaleString('es-AR')}, estado: ${b.estado})`)
+        .join('\n') ?? 'Sin categorías configuradas'
+    ) + `\n\nREGLA DE CATEGORIZACIÓN — OBLIGATORIA:`
+      + `\nUsá EXACTAMENTE estos nombres de categoría: ${userCategoryNames || '"otros"'}.`
+      + `\nNunca inventes un nombre que no esté en esa lista.`
+      + `\nSi el gasto no encaja claramente en ninguna → usá "otros".`;
 
     const cuentaResuelta = serverResolvedAccountId
       ? (() => {
@@ -880,37 +865,24 @@ function buildDynamicContext(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// buildSystemPrompt v3.0 — intents focalizados, sin concatenar todo
+// buildSystemPrompt
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildSystemPrompt(intent: BackendIntent): string {
   switch (intent) {
-    case 'registro':
-      return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_REGISTRO;
-    case 'consulta_simple':
-      return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_CONSULTA;
-    case 'consulta_historica':
-      return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_HISTORICO;
-    case 'simulacion':
-      return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_SIMULACION;
-    case 'planificacion':
-      return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_PLANIFICACION;
-    case 'gestion_cuentas':
-      return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_GESTION_CUENTAS;
+    case 'registro':        return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_REGISTRO;
+    case 'consulta_simple': return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_CONSULTA;
+    case 'consulta_historica': return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_HISTORICO;
+    case 'simulacion':      return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_SIMULACION;
+    case 'planificacion':   return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_PLANIFICACION;
+    case 'gestion_cuentas': return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_GESTION_CUENTAS;
     case 'complejo':
-      // FIX: antes concatenaba 6 prompts — costoso y confuso.
-      // Ahora solo los 3 más relevantes para análisis complejo.
-      return (
-        SYSTEM_PROMPT_BASE +
-        SYSTEM_PROMPT_COMPLEJO +
-        SYSTEM_PROMPT_HISTORICO +
-        SYSTEM_PROMPT_SIMULACION
-      );
+      return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_COMPLEJO + SYSTEM_PROMPT_HISTORICO + SYSTEM_PROMPT_SIMULACION;
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Historia y max_tokens dinámicos (ajustados v3.0)
+// Historia y max_tokens dinámicos
 // ─────────────────────────────────────────────────────────────────────────────
 
 function getHistorySlice(
@@ -918,36 +890,22 @@ function getHistorySlice(
   history: Array<{ role: string; content: string }>
 ): Array<{ role: 'user' | 'assistant'; content: string }> {
   const limits: Record<BackendIntent, number> = {
-    registro: 4,
-    gestion_cuentas: 2,
-    consulta_simple: 4,
-    consulta_historica: 4,
-    simulacion: 4,
-    planificacion: 6,
-    complejo: 6,
+    registro: 4, gestion_cuentas: 2, consulta_simple: 4,
+    consulta_historica: 4, simulacion: 4, planificacion: 6, complejo: 6,
   };
-  const limit = limits[intent];
-  return history
-    .slice(-limit)
-    .map((msg) => ({
-      role: msg.role as 'user' | 'assistant',
-      content: msg.content,
-    }));
+  return history.slice(-limits[intent]).map((msg) => ({
+    role: msg.role as 'user' | 'assistant',
+    content: msg.content,
+  }));
 }
 
 function getMaxTokens(intent: BackendIntent): number {
   const limits: Record<BackendIntent, number> = {
-    registro: 450,
-    gestion_cuentas: 250,
-    consulta_simple: 400,
-    consulta_historica: 600,
-    simulacion: 700,
-    planificacion: 900,
-    complejo: 800,
+    registro: 450, gestion_cuentas: 250, consulta_simple: 400,
+    consulta_historica: 600, simulacion: 700, planificacion: 900, complejo: 800,
   };
   return limits[intent];
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TIPOS INTERNOS
@@ -974,6 +932,7 @@ interface GoalRow {
 interface BudgetRow {
   id: string;
   category: string;
+  custom_aliases: string[];
 }
 
 interface InstallmentRow {
@@ -1011,9 +970,7 @@ function cleanAndParseAIResponse(raw: string): ChatResponse {
           ...(parsed.ui ? { ui: parsed.ui } : {}),
         } as ChatResponse;
       }
-    } catch {
-      // Parse falló — extracción quirúrgica
-    }
+    } catch { /* silenciar */ }
   }
 
   const actionMatch = cleaned.match(/"action"\s*:\s*"([^"]+)"/);
@@ -1022,17 +979,13 @@ function cleanAndParseAIResponse(raw: string): ChatResponse {
   if (actionMatch && mensajeMatch) {
     const action = actionMatch[1];
     const mensaje = mensajeMatch[1]
-      .replace(/\\n/g, '\n')
-      .replace(/\\"/g, '"')
-      .replace(/\\\\/g, '\\');
+      .replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
 
     let data: Record<string, unknown> = {};
     if (action === 'INSERT_TRANSACTIONS_BATCH') {
       try {
         const txMatch = cleaned.match(/"transactions"\s*:\s*(\[[\s\S]*?\](?=\s*\}))/);
-        if (txMatch) {
-          data = { transactions: JSON.parse(txMatch[1]) };
-        }
+        if (txMatch) data = { transactions: JSON.parse(txMatch[1]) };
       } catch { /* silenciar */ }
     }
 
@@ -1043,123 +996,12 @@ function cleanAndParseAIResponse(raw: string): ChatResponse {
     } as ChatResponse;
   }
 
-  return {
-    action: 'RESPUESTA_CONSULTA',
-    mensaje_respuesta: 'Procesé tu solicitud.',
-    data: {},
-  };
+  return { action: 'RESPUESTA_CONSULTA', mensaje_respuesta: 'Procesé tu solicitud.', data: {} };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // saveTransactionsToSupabase
 // ─────────────────────────────────────────────────────────────────────────────
-
-async function saveTransactionsToSupabase(
-  transacciones: TransactionPayload[],
-  originalMessage: string,
-  userId: string | null,
-  budgetsData: BudgetRow[],
-  goalsData: GoalRow[],
-  userToken: string | null | undefined,
-  context: RequestContext & { server_resolved_account_id?: string | null }
-): Promise<void> {
-  const supabase = userToken
-    ? createSupabaseServerClientWithToken(userToken)
-    : createSupabaseServerClient();
-
-  try {
-    const transactionsToInsert: TransactionInsert[] = transacciones.map((tx) => {
-      const txCategory = tx.category ?? tx.categoria ?? '';
-
-      const budgetMatch = budgetsData.find((b) => {
-        if (b.category === txCategory) return true;
-        if (txCategory.includes(b.category) || b.category.includes(txCategory)) return true;
-        const aliases: Record<string, string[]> = {
-          alimentacion: ['super', 'supermercado', 'mercado', 'comida', 'almacen', 'verduleria'],
-          transporte: ['nafta', 'colectivo', 'subte', 'uber', 'taxi', 'remis', 'sube'],
-          salidas: ['bar', 'restaurant', 'cine', 'teatro', 'entretenimiento'],
-          salud: ['farmacia', 'medico', 'dentista', 'clinica'],
-          servicios: ['luz', 'gas', 'agua', 'internet', 'telefono'],
-        };
-        return aliases[b.category]?.includes(txCategory) ?? false;
-      });
-
-      const goalMatch =
-        txCategory === 'ahorro'
-          ? goalsData.find((g) => g.is_active && !g.is_completed)
-          : undefined;
-
-      return {
-        description: tx.description ?? tx.descripcion ?? 'Sin descripción',
-        amount: Math.abs(Number(tx.amount ?? tx.monto) || 0),
-        category: txCategory,
-        type: (tx.type ?? tx.tipo ?? 'gasto') as 'gasto' | 'ingreso',
-        transaction_date:
-          tx.transaction_date ?? tx.fecha ?? new Date().toISOString().split('T')[0],
-        confirmed: tx.confirmed ?? false,
-        source: 'voice' as const,
-        original_message: originalMessage,
-        ai_confidence: 0.95,
-        user_id: userId ?? undefined,
-        budget_id: budgetMatch?.id ?? undefined,
-        goal_id: goalMatch?.id ?? undefined,
-        account_id:
-          tx.account_id
-          ?? context.server_resolved_account_id
-          ?? context.resolved_account_id
-          ?? null,
-        installment_count: tx.installment_count ?? 1,
-        first_due_month: tx.first_due_month ?? undefined,
-      };
-    });
-
-    const { data, error } = await supabase
-      .from('transactions')
-      .insert(
-        transactionsToInsert.map(
-          ({ installment_count: _ic, first_due_month: _fd, ...rest }) => rest
-        )
-      )
-      .select();
-
-    if (error) {
-      throw handleSupabaseError(error);
-    }
-
-    if (data && data.length > 0 && userId) {
-      for (let idx = 0; idx < data.length; idx++) {
-        const saved = data[idx] as { id: string; account_id: string | null; amount: number };
-        const txExtra = transactionsToInsert[idx];
-        if (!saved.account_id) continue;
-
-        const { data: accData } = await supabase
-          .from('accounts')
-          .select('type')
-          .eq('id', saved.account_id)
-          .single();
-
-        if ((accData as { type?: string } | null)?.type !== 'credit') continue;
-
-        const installCount = (txExtra as TransactionInsert & { installment_count?: number }).installment_count ?? 1;
-        const firstDueMonth =
-          (txExtra as TransactionInsert & { first_due_month?: string }).first_due_month ??
-          new Date().toISOString().slice(0, 7);
-
-        await generateInstallments(
-          saved.id,
-          saved.account_id,
-          userId,
-          saved.amount,
-          installCount,
-          firstDueMonth,
-          supabase
-        );
-      }
-    }
-  } catch (error) {
-    throw error;
-  }
-}
 
 interface TransactionPayload {
   description?: string;
@@ -1176,6 +1018,102 @@ interface TransactionPayload {
   account_id?: string | null;
   installment_count?: number;
   first_due_month?: string | null;
+}
+
+async function saveTransactionsToSupabase(
+  transacciones: TransactionPayload[],
+  originalMessage: string,
+  userId: string | null,
+  budgetsData: BudgetRow[],
+  goalsData: GoalRow[],
+  userToken: string | null | undefined,
+  context: RequestContext & { server_resolved_account_id?: string | null }
+): Promise<void> {
+  const supabase = userToken
+    ? createSupabaseServerClientWithToken(userToken)
+    : createSupabaseServerClient();
+
+  try {
+    // Construir mapas para resolveCategory una sola vez
+    const userCategories = budgetsData.map(b => b.category);
+    const budgetAliases: Record<string, string[]> = {};
+    for (const b of budgetsData) {
+      budgetAliases[b.category] = Array.isArray(b.custom_aliases) ? b.custom_aliases : [];
+    }
+
+    const transactionsToInsert: TransactionInsert[] = transacciones.map((tx) => {
+      const rawCategory = (tx.category ?? tx.categoria ?? '').toLowerCase().trim();
+
+      // Normalizar usando el sistema centralizado
+      const normalizedCategory = resolveCategory(rawCategory, userCategories, budgetAliases);
+
+      // Buscar budget matching con la categoría ya normalizada
+      const budgetMatch = budgetsData.find(b => b.category === normalizedCategory);
+
+      const goalMatch =
+        normalizedCategory === 'ahorro'
+          ? goalsData.find(g => g.is_active && !g.is_completed)
+          : undefined;
+
+      return {
+        description:      tx.description ?? tx.descripcion ?? 'Sin descripción',
+        amount:           Math.abs(Number(tx.amount ?? tx.monto) || 0),
+        category:         normalizedCategory,
+        type:             (tx.type ?? tx.tipo ?? 'gasto') as 'gasto' | 'ingreso',
+        transaction_date: tx.transaction_date ?? tx.fecha ?? new Date().toISOString().split('T')[0],
+        confirmed:        tx.confirmed ?? false,
+        source:           'voice' as const,
+        original_message: originalMessage,
+        ai_confidence:    0.95,
+        user_id:          userId ?? undefined,
+        budget_id:        budgetMatch?.id ?? undefined,
+        goal_id:          goalMatch?.id ?? undefined,
+        account_id:
+          tx.account_id
+          ?? context.server_resolved_account_id
+          ?? context.resolved_account_id
+          ?? null,
+        installment_count: tx.installment_count ?? 1,
+        first_due_month:   tx.first_due_month ?? undefined,
+      };
+    });
+
+    const { data, error } = await supabase
+      .from('transactions')
+      .insert(
+        transactionsToInsert.map(
+          ({ installment_count: _ic, first_due_month: _fd, ...rest }) => rest
+        )
+      )
+      .select();
+
+    if (error) throw handleSupabaseError(error);
+
+    if (data && data.length > 0 && userId) {
+      for (let idx = 0; idx < data.length; idx++) {
+        const saved = data[idx] as { id: string; account_id: string | null; amount: number };
+        const txExtra = transactionsToInsert[idx];
+        if (!saved.account_id) continue;
+
+        const { data: accData } = await supabase
+          .from('accounts').select('type').eq('id', saved.account_id).single();
+
+        if ((accData as { type?: string } | null)?.type !== 'credit') continue;
+
+        const installCount = (txExtra as TransactionInsert & { installment_count?: number }).installment_count ?? 1;
+        const firstDueMonth =
+          (txExtra as TransactionInsert & { first_due_month?: string }).first_due_month ??
+          new Date().toISOString().slice(0, 7);
+
+        await generateInstallments(
+          saved.id, saved.account_id, userId,
+          saved.amount, installCount, firstDueMonth, supabase
+        );
+      }
+    }
+  } catch (error) {
+    throw error;
+  }
 }
 
 function ensureGoalEmoji(goalName: string): string {
@@ -1249,31 +1187,20 @@ async function createAccountInSupabase(
 ): Promise<Record<string, unknown>> {
   if (data.set_as_default) {
     await supabaseClient
-      .from('accounts')
-      .update({ is_default: false })
-      .eq('user_id', userId)
-      .eq('type', data.type)
-      .eq('is_default', true);
+      .from('accounts').update({ is_default: false })
+      .eq('user_id', userId).eq('type', data.type).eq('is_default', true);
   }
 
   const { data: account, error } = await supabaseClient
     .from('accounts')
     .insert({
-      user_id: userId,
-      name: data.name,
-      type: data.type.toLowerCase(),
-      balance: data.balance ?? 0,
-      credit_limit: data.credit_limit ?? null,
-      closing_day: data.closing_day ?? null,
-      due_day: data.due_day ?? null,
-      icon: data.icon ?? null,
-      color: data.color ?? null,
-      is_default: data.set_as_default ?? false,
-      is_active: true,
-      currency: 'ARS',
+      user_id: userId, name: data.name, type: data.type.toLowerCase(),
+      balance: data.balance ?? 0, credit_limit: data.credit_limit ?? null,
+      closing_day: data.closing_day ?? null, due_day: data.due_day ?? null,
+      icon: data.icon ?? null, color: data.color ?? null,
+      is_default: data.set_as_default ?? false, is_active: true, currency: 'ARS',
     })
-    .select()
-    .single();
+    .select().single();
 
   if (error) throw error;
   return account as Record<string, unknown>;
@@ -1285,31 +1212,18 @@ async function updateAccountBalanceInSupabase(
   userId: string
 ): Promise<{ updated: boolean; accountName: string; suggestion?: string }> {
   const { data: accounts, error } = await supabaseClient
-    .from('accounts')
-    .select('id, name, type, balance')
-    .eq('user_id', userId)
-    .eq('is_active', true)
-    .ilike('name', `%${data.account_name}%`);
+    .from('accounts').select('id, name, type, balance')
+    .eq('user_id', userId).eq('is_active', true).ilike('name', `%${data.account_name}%`);
 
   if (error) throw handleSupabaseError(error);
 
   if (!accounts || accounts.length === 0) {
-    return {
-      updated: false,
-      accountName: data.account_name,
-      suggestion: `No encontré ninguna cuenta con ese nombre. ¿Querés crearla?`,
-    };
+    return { updated: false, accountName: data.account_name, suggestion: `No encontré ninguna cuenta con ese nombre. ¿Querés crearla?` };
   }
 
   const target = accounts[0] as { id: string; name: string };
-
-  const { error: updateErr } = await supabaseClient
-    .from('accounts')
-    .update({ balance: data.new_balance })
-    .eq('id', target.id);
-
+  const { error: updateErr } = await supabaseClient.from('accounts').update({ balance: data.new_balance }).eq('id', target.id);
   if (updateErr) throw handleSupabaseError(updateErr);
-
   return { updated: true, accountName: target.name };
 }
 
@@ -1327,8 +1241,7 @@ async function createBudgetInSupabase(
   const { error } = await supabase.from('budgets').insert({
     category: String(budgetData.category ?? '').toLowerCase().trim(),
     limit_amount: budgetData.limit_amount,
-    month_period:
-      String(budgetData.month_period ?? '') || new Date().toISOString().slice(0, 7),
+    month_period: String(budgetData.month_period ?? '') || new Date().toISOString().slice(0, 7),
     user_id: userId,
   });
 
@@ -1349,35 +1262,23 @@ async function updateGoalProgressInSupabase(
     : createSupabaseServerClient();
 
   const { data: existingGoals, error: searchError } = await supabase
-    .from('goals')
-    .select('*')
-    .eq('user_id', userId)
-    .ilike('name', `%${goalName}%`)
-    .eq('is_active', true);
+    .from('goals').select('*').eq('user_id', userId)
+    .ilike('name', `%${goalName}%`).eq('is_active', true);
 
   if (searchError) throw handleSupabaseError(searchError);
 
-  const targetGoal = (existingGoals as Array<{
-    id: string;
-    current_amount: number;
-    target_amount: number;
-  }> | null)?.[0];
+  const targetGoal = (existingGoals as Array<{ id: string; current_amount: number; target_amount: number }> | null)?.[0];
 
   if (!targetGoal && createIfMissing) {
     const targetDate = new Date();
     targetDate.setMonth(targetDate.getMonth() + 6);
-
     const { error: createError } = await supabase.from('goals').insert({
-      user_id: userId,
-      name: ensureGoalEmoji(goalName),
-      target_amount: amount * 10,
-      current_amount: amount,
+      user_id: userId, name: ensureGoalEmoji(goalName),
+      target_amount: amount * 10, current_amount: amount,
       target_date: targetDate.toISOString().split('T')[0],
       description: `Meta creada automáticamente para "${goalName}"`,
-      icon: '🎯',
-      color: 'text-emerald-500',
+      icon: '🎯', color: 'text-emerald-500',
     });
-
     if (createError) throw handleSupabaseError(createError);
     return;
   }
@@ -1386,12 +1287,8 @@ async function updateGoalProgressInSupabase(
 
   const newAmount = targetGoal.current_amount + amount;
   const isCompleted = newAmount >= targetGoal.target_amount;
-
-  const { error } = await supabase
-    .from('goals')
-    .update({ current_amount: newAmount, is_completed: isCompleted })
-    .eq('id', targetGoal.id);
-
+  const { error } = await supabase.from('goals')
+    .update({ current_amount: newAmount, is_completed: isCompleted }).eq('id', targetGoal.id);
   if (error) throw handleSupabaseError(error);
 }
 
@@ -1402,56 +1299,36 @@ async function resolveAccount(
   supabaseClient: ReturnType<typeof createSupabaseServerClient>
 ): Promise<{ account_id: string | null; error: string | null }> {
   const { data: accounts, error } = await supabaseClient
-    .from('accounts')
-    .select('id, name, type, is_default')
-    .eq('user_id', userId)
-    .eq('is_active', true);
+    .from('accounts').select('id, name, type, is_default')
+    .eq('user_id', userId).eq('is_active', true);
 
-  if (error || !accounts || accounts.length === 0) {
-    return { account_id: null, error: null };
-  }
+  if (error || !accounts || accounts.length === 0) return { account_id: null, error: null };
 
-  const typedAccounts = accounts as Array<{
-    id: string;
-    name: string;
-    type: string;
-    is_default: boolean;
-  }>;
-
+  const typedAccounts = accounts as Array<{ id: string; name: string; type: string; is_default: boolean }>;
   const msgLower = message.toLowerCase();
+
   for (const acc of typedAccounts) {
-    if (msgLower.includes(acc.name.toLowerCase())) {
-      return { account_id: acc.id, error: null };
-    }
+    if (msgLower.includes(acc.name.toLowerCase())) return { account_id: acc.id, error: null };
   }
 
-  if (context.resolved_account_id) {
-    return { account_id: context.resolved_account_id, error: null };
-  }
+  if (context.resolved_account_id) return { account_id: context.resolved_account_id, error: null };
 
-  const defaultLiquid = typedAccounts.find((a) => a.is_default && a.type === 'liquid');
+  const defaultLiquid = typedAccounts.find(a => a.is_default && a.type === 'liquid');
   if (defaultLiquid) return { account_id: defaultLiquid.id, error: null };
 
-  const liquidAccounts = typedAccounts.filter((a) => a.type === 'liquid');
+  const liquidAccounts = typedAccounts.filter(a => a.type === 'liquid');
   if (liquidAccounts.length === 1) return { account_id: liquidAccounts[0].id, error: null };
 
-  const anyDefault = typedAccounts.find((a) => a.is_default);
+  const anyDefault = typedAccounts.find(a => a.is_default);
   if (anyDefault) return { account_id: anyDefault.id, error: null };
 
-  const names = typedAccounts.map((a) => `"${a.name}"`).join(', ');
-  return {
-    account_id: null,
-    error: `Tenés varias cuentas (${names}). ¿En cuál querés registrar esto?`,
-  };
+  const names = typedAccounts.map(a => `"${a.name}"`).join(', ');
+  return { account_id: null, error: `Tenés varias cuentas (${names}). ¿En cuál querés registrar esto?` };
 }
 
 async function generateInstallments(
-  transactionId: string,
-  accountId: string,
-  userId: string,
-  totalAmount: number,
-  installmentCount: number,
-  firstDueMonth: string,
+  transactionId: string, accountId: string, userId: string,
+  totalAmount: number, installmentCount: number, firstDueMonth: string,
   supabaseClient: ReturnType<typeof createSupabaseServerClient>
 ): Promise<void> {
   const [yearStr, monthStr] = firstDueMonth.split('-');
@@ -1463,14 +1340,9 @@ async function generateInstallments(
     const d = new Date(baseYear, baseMonth + i, 1);
     const due_month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     return {
-      transaction_id: transactionId,
-      account_id: accountId,
-      user_id: userId,
-      installment_number: i + 1,
-      total_installments: installmentCount,
-      due_month,
-      amount: installmentAmount,
-      is_paid: false,
+      transaction_id: transactionId, account_id: accountId, user_id: userId,
+      installment_number: i + 1, total_installments: installmentCount,
+      due_month, amount: installmentAmount, is_paid: false,
     };
   });
 
@@ -1499,99 +1371,45 @@ async function executeAction(
 ): Promise<ActionResult> {
   switch (action) {
     case 'INSERT_TRANSACTION': {
-      await saveTransactionsToSupabase(
-        [data as TransactionPayload],
-        originalMessage,
-        userId,
-        budgetsData,
-        goalsData,
-        userToken,
-        context
-      );
+      await saveTransactionsToSupabase([data as TransactionPayload], originalMessage, userId, budgetsData, goalsData, userToken, context);
       return { success: true, message: 'Transacción guardada' };
     }
-
     case 'INSERT_TRANSACTIONS_BATCH': {
       const txArray = (data?.transactions ?? []) as TransactionPayload[];
-      if (!Array.isArray(txArray) || txArray.length === 0) {
-        throw new Error('Batch vacío o inválido');
-      }
-      await saveTransactionsToSupabase(
-        txArray,
-        originalMessage,
-        userId,
-        budgetsData,
-        goalsData,
-        userToken,
-        context
-      );
+      if (!Array.isArray(txArray) || txArray.length === 0) throw new Error('Batch vacío o inválido');
+      await saveTransactionsToSupabase(txArray, originalMessage, userId, budgetsData, goalsData, userToken, context);
       return { success: true, message: `${txArray.length} transacciones guardadas` };
     }
-
     case 'CREATE_GOAL':
       await createGoalInSupabase(data as Record<string, unknown>, userId, userToken);
       return { success: true, message: 'Meta creada' };
-
     case 'CREATE_BUDGET':
       await createBudgetInSupabase(data as Record<string, unknown>, userId, userToken);
       return { success: true, message: 'Presupuesto creado' };
-
     case 'CREATE_ACCOUNT': {
       if (!userId) throw new Error('userId requerido para crear cuenta');
       const { createClient } = await import('@supabase/supabase-js');
       const supabase = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        {
-          global: { headers: { Authorization: `Bearer ${userToken}` } },
-          auth: { persistSession: false, autoRefreshToken: false },
-        }
+        process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        { global: { headers: { Authorization: `Bearer ${userToken}` } }, auth: { persistSession: false, autoRefreshToken: false } }
       );
-      const account = await createAccountInSupabase(
-        data as Parameters<typeof createAccountInSupabase>[0],
-        supabase,
-        userId
-      );
-      return {
-        success: true,
-        mensaje_respuesta: 'Cuenta creada exitosamente',
-        action: 'CREATE_ACCOUNT',
-        data: account,
-      };
+      const account = await createAccountInSupabase(data as Parameters<typeof createAccountInSupabase>[0], supabase, userId);
+      return { success: true, mensaje_respuesta: 'Cuenta creada exitosamente', action: 'CREATE_ACCOUNT', data: account };
     }
-
     case 'UPDATE_ACCOUNT_BALANCE': {
       if (!userId) throw new Error('userId requerido para actualizar cuenta');
       const { createClient } = await import('@supabase/supabase-js');
       const supabase = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        {
-          global: { headers: { Authorization: `Bearer ${userToken}` } },
-          auth: { persistSession: false, autoRefreshToken: false },
-        }
+        process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        { global: { headers: { Authorization: `Bearer ${userToken}` } }, auth: { persistSession: false, autoRefreshToken: false } }
       );
-      const result = await updateAccountBalanceInSupabase(
-        data as { account_name: string; new_balance: number },
-        supabase,
-        userId
-      );
-      if (!result.updated && result.suggestion) {
-        return { success: false, suggestion: result.suggestion, message: result.suggestion };
-      }
+      const result = await updateAccountBalanceInSupabase(data as { account_name: string; new_balance: number }, supabase, userId);
+      if (!result.updated && result.suggestion) return { success: false, suggestion: result.suggestion, message: result.suggestion };
       return { success: true, message: `Balance actualizado en ${result.accountName}` };
     }
-
     case 'UPDATE_GOAL_PROGRESS':
-      await updateGoalProgressInSupabase(
-        String(data?.goal_name ?? ''),
-        Number(data?.amount ?? 0),
-        userId,
-        userToken,
-        Boolean(data?.create_if_missing ?? true)
-      );
+      await updateGoalProgressInSupabase(String(data?.goal_name ?? ''), Number(data?.amount ?? 0), userId, userToken, Boolean(data?.create_if_missing ?? true));
       return { success: true, message: 'Progreso actualizado' };
-
     case 'QUERY_BUDGET':
     case 'QUERY_GOALS':
     case 'QUERY_TRANSACTIONS':
@@ -1600,10 +1418,8 @@ async function executeAction(
     case 'RESPUESTA_SIMULACION':
     case 'PLAN_MENSUAL':
       return { success: true, message: originalMessage };
-
     case 'ERROR':
       throw new Error(String(data?.mensaje_respuesta ?? 'Error en el procesamiento'));
-
     default:
       return { success: true, message: originalMessage };
   }
@@ -1630,12 +1446,8 @@ export async function POST(request: NextRequest) {
       const token = authHeader.replace('Bearer ', '');
       const { createClient } = await import('@supabase/supabase-js');
       const supabaseWithToken = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        {
-          global: { headers: { Authorization: `Bearer ${token}` } },
-          auth: { persistSession: false, autoRefreshToken: false },
-        }
+        process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        { global: { headers: { Authorization: `Bearer ${token}` } }, auth: { persistSession: false, autoRefreshToken: false } }
       );
       const { data: { user } } = await supabaseWithToken.auth.getUser();
       userId = user?.id ?? null;
@@ -1650,29 +1462,20 @@ export async function POST(request: NextRequest) {
     if (userId) {
       try {
         const [budgetsRes, goalsRes, accountsRes, installmentsRes] = await Promise.all([
-          supabaseServer.from('budgets').select('id, category').eq('user_id', userId),
-          supabaseServer
-            .from('goals')
-            .select('id, name, is_active, is_completed')
-            .eq('user_id', userId)
-            .eq('is_active', true),
-          supabaseServer
-            .from('accounts')
-            .select('id, name, type, balance, credit_limit, closing_day, due_day, is_default')
-            .eq('user_id', userId)
-            .eq('is_active', true),
-          supabaseServer
-            .from('installments')
-            .select('amount')
-            .eq('user_id', userId)
-            .eq('is_paid', false),
+          supabaseServer.from('budgets').select('id, category, custom_aliases').eq('user_id', userId),
+          supabaseServer.from('goals').select('id, name, is_active, is_completed').eq('user_id', userId).eq('is_active', true),
+          supabaseServer.from('accounts').select('id, name, type, balance, credit_limit, closing_day, due_day, is_default').eq('user_id', userId).eq('is_active', true),
+          supabaseServer.from('installments').select('amount').eq('user_id', userId).eq('is_paid', false),
         ]);
 
-        budgetsData = (budgetsRes.data ?? []) as BudgetRow[];
+        budgetsData = ((budgetsRes.data ?? []) as Array<{ id: string; category: string; custom_aliases: unknown }>).map(b => ({
+          id: b.id,
+          category: b.category,
+          custom_aliases: Array.isArray(b.custom_aliases) ? b.custom_aliases as string[] : [],
+        }));
         goalsData = (goalsRes.data ?? []) as GoalRow[];
         accountsData = (accountsRes.data ?? []) as AccountRow[];
-        unpaidInstallmentsTotal = ((installmentsRes.data ?? []) as InstallmentRow[])
-          .reduce((s, i) => s + Number(i.amount), 0);
+        unpaidInstallmentsTotal = ((installmentsRes.data ?? []) as InstallmentRow[]).reduce((s, i) => s + Number(i.amount), 0);
       } catch (err) {
         console.error('Error fetching data:', err);
       }
@@ -1682,18 +1485,9 @@ export async function POST(request: NextRequest) {
 
     const intentForAccountResolution = classifyIntent(message);
     if (userId && intentForAccountResolution === 'registro') {
-      const { account_id, error: accError } = await resolveAccount(
-        userId,
-        message,
-        context,
-        supabaseServer
-      );
+      const { account_id, error: accError } = await resolveAccount(userId, message, context, supabaseServer);
       if (accError) {
-        const { data: accsForPicker } = await supabaseServer
-          .from('accounts')
-          .select('id, name, type')
-          .eq('user_id', userId)
-          .eq('is_active', true);
+        const { data: accsForPicker } = await supabaseServer.from('accounts').select('id, name, type').eq('user_id', userId).eq('is_active', true);
         return NextResponse.json({
           action: 'NEEDS_ACCOUNT_SELECTION',
           mensaje_respuesta: accError,
@@ -1703,18 +1497,10 @@ export async function POST(request: NextRequest) {
       serverResolvedAccountId = account_id;
     }
 
-    const liquidBalance = accountsData
-      .filter((a) => a.type === 'liquid')
-      .reduce((s, a) => s + Number(a.balance), 0);
-    const savingsBalance = accountsData
-      .filter((a) => a.type === 'savings')
-      .reduce((s, a) => s + Number(a.balance), 0);
-    const creditDebt = accountsData
-      .filter((a) => a.type === 'credit')
-      .reduce((s, a) => s + Number(a.balance), 0);
-    const creditLimit = accountsData
-      .filter((a) => a.type === 'credit')
-      .reduce((s, a) => s + Number(a.credit_limit ?? 0), 0);
+    const liquidBalance = accountsData.filter(a => a.type === 'liquid').reduce((s, a) => s + Number(a.balance), 0);
+    const savingsBalance = accountsData.filter(a => a.type === 'savings').reduce((s, a) => s + Number(a.balance), 0);
+    const creditDebt = accountsData.filter(a => a.type === 'credit').reduce((s, a) => s + Number(a.balance), 0);
+    const creditLimit = accountsData.filter(a => a.type === 'credit').reduce((s, a) => s + Number(a.credit_limit ?? 0), 0);
     const realDisponible = liquidBalance - creditDebt;
 
     if (!process.env.GROQ_API_KEY) {
@@ -1722,37 +1508,19 @@ export async function POST(request: NextRequest) {
     }
 
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
     const intent: BackendIntent = classifyIntent(message);
 
-    const dynamicContext = buildDynamicContext(
-      intent,
-      context,
-      accountsData,
-      serverResolvedAccountId,
-      liquidBalance,
-      savingsBalance,
-      creditDebt,
-      creditLimit,
-      realDisponible,
-      unpaidInstallmentsTotal
-    );
-
+    const dynamicContext = buildDynamicContext(intent, context, accountsData, serverResolvedAccountId, liquidBalance, savingsBalance, creditDebt, creditLimit, realDisponible, unpaidInstallmentsTotal);
     const systemPrompt = buildSystemPrompt(intent);
     const historySlice = getHistorySlice(intent, history);
     const maxTokens = getMaxTokens(intent);
 
     const estimatedInputTokens =
-      estimateTokens(systemPrompt) +
-      estimateTokens(dynamicContext) +
+      estimateTokens(systemPrompt) + estimateTokens(dynamicContext) +
       historySlice.reduce((s, m) => s + estimateTokens(m.content), 0) +
       estimateTokens(message);
 
-    console.log('📊 TOKENS:', {
-      intent,
-      estimated_input: estimatedInputTokens,
-      max_output: maxTokens,
-    });
+    console.log('📊 TOKENS:', { intent, estimated_input: estimatedInputTokens, max_output: maxTokens });
 
     const messages: GroqMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -1775,54 +1543,34 @@ export async function POST(request: NextRequest) {
       const aiResponse: ChatResponse = cleanAndParseAIResponse(rawContent);
 
       try {
-        const enrichedContext = {
-          ...context,
-          server_resolved_account_id: serverResolvedAccountId ?? undefined,
-        };
+        const enrichedContext = { ...context, server_resolved_account_id: serverResolvedAccountId ?? undefined };
 
         const actionResult = await executeAction(
-          aiResponse.action,
-          aiResponse.data as Record<string, unknown> | null,
-          message,
-          userId,
-          budgetsData,
-          goalsData,
-          authHeader?.replace('Bearer ', '') ?? null,
-          enrichedContext
+          aiResponse.action, aiResponse.data as Record<string, unknown> | null,
+          message, userId, budgetsData, goalsData,
+          authHeader?.replace('Bearer ', '') ?? null, enrichedContext
         );
 
         if (!actionResult.success && actionResult.suggestion) {
           aiResponse.mensaje_respuesta = actionResult.suggestion;
         }
-
         if (actionResult.data) {
-          aiResponse.data = {
-            ...(aiResponse.data as Record<string, unknown> ?? {}),
-            query_result: actionResult.data,
-          };
+          aiResponse.data = { ...(aiResponse.data as Record<string, unknown> ?? {}), query_result: actionResult.data };
         }
-
         if ((aiResponse.action === 'INSERT_TRANSACTION' || (aiResponse.action as string) === 'INSERT_TRANSACTIONS_BATCH') && serverResolvedAccountId) {
           const resolvedAcc = accountsData.find(a => a.id === serverResolvedAccountId);
           if (resolvedAcc) {
-            const enriched: Record<string, unknown> = {
+            aiResponse.data = {
               ...(aiResponse.data as Record<string, unknown> ?? {}),
               _account_name: resolvedAcc.name,
               _account_type: resolvedAcc.type,
-            };
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            aiResponse.data = enriched as any;
+            } as typeof aiResponse.data;
           }
         }
-
       } catch (actionError) {
         console.error('Error ejecutando acción:', actionError);
         return NextResponse.json(
-          {
-            action: 'ERROR',
-            error: 'Error ejecutando la acción',
-            mensaje_respuesta: `No pude ejecutar tu solicitud: ${actionError instanceof Error ? actionError.message : 'Error desconocido'}`,
-          },
+          { action: 'ERROR', error: 'Error ejecutando la acción', mensaje_respuesta: `No pude ejecutar tu solicitud: ${actionError instanceof Error ? actionError.message : 'Error desconocido'}` },
           { status: 500 }
         );
       }
@@ -1831,21 +1579,14 @@ export async function POST(request: NextRequest) {
     } catch (error) {
       console.error('Error en Groq:', error);
       return NextResponse.json(
-        {
-          action: 'ERROR',
-          error: 'Error procesando la solicitud',
-          mensaje_respuesta: 'Tuve problemas para entender tu mensaje. ¿Podés reformularlo?',
-        },
+        { action: 'ERROR', error: 'Error procesando la solicitud', mensaje_respuesta: 'Tuve problemas para entender tu mensaje. ¿Podés reformularlo?' },
         { status: 500 }
       );
     }
   } catch (error) {
     console.error('Error en API de chat:', error);
     return NextResponse.json(
-      {
-        error: 'Error procesando la solicitud',
-        details: error instanceof Error ? error.message : 'Error desconocido',
-      },
+      { error: 'Error procesando la solicitud', details: error instanceof Error ? error.message : 'Error desconocido' },
       { status: 500 }
     );
   }

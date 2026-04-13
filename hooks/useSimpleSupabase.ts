@@ -1,13 +1,12 @@
 // ============================================================
 // AI Wallet — Hook useSimpleSupabase (actualizado)
-// ============================================================
 // hooks/useSimpleSupabase.ts
 //
-// Cambios respecto a la versión anterior:
-//   - SimpleAccount incluye closing_day, due_day, color, icon
-//   - fetchAllData incluye los nuevos campos
-//   - createAccount persiste closing_day, due_day
-//   - is_default ahora es gestionado con unicidad por tipo
+// Cambios respecto a versión anterior:
+//   - SimpleBudget incluye custom_aliases
+//   - fetchAllData selecciona custom_aliases
+//   - createBudget acepta custom_aliases
+//   - nueva función: updateBudgetAliases
 // ============================================================
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -32,6 +31,7 @@ export interface SimpleBudget {
   limit_amount: number;
   period: string;
   month_period: string;
+  custom_aliases: string[]  // ← NUEVO: aliases guardados en DB
 }
 
 export interface SimpleGoal {
@@ -45,13 +45,6 @@ export interface SimpleGoal {
   is_completed: boolean;
 }
 
-/**
- * Semántica de balance:
- *   liquid / savings → saldo disponible (positivo = tiene plata)
- *   credit           → deuda actual     (positivo = debe esa cantidad)
- *
- * disponible_tarjeta = credit_limit - balance  (calculado en componente/hook)
- */
 export interface SimpleAccount {
   id: string;
   name: string;
@@ -99,8 +92,9 @@ export interface UseSimpleSupabaseReturn {
   updateGoal: (id: string, updates: Partial<SimpleGoal>) => Promise<boolean>;
   createGoal: (goal: Omit<SimpleGoal, 'id' | 'is_completed'>) => Promise<boolean>;
   updateBudget: (id: string, limitAmount: number) => Promise<boolean>;
-  createBudget: (category: string, limitAmount: number, monthPeriod?: string) => Promise<boolean>;
+  createBudget: (category: string, limitAmount: number, monthPeriod?: string, customAliases?: string[]) => Promise<boolean>;
   deleteBudget: (id: string) => Promise<boolean>;
+  updateBudgetAliases: (id: string, aliases: string[]) => Promise<boolean>; // ← NUEVO
   setDefaultAccount: (id: string) => Promise<boolean>;
   createAccount: (data: CreateAccountInput) => Promise<SimpleAccount | null>;
 }
@@ -126,7 +120,7 @@ async function fetchAllData(supabase: ReturnType<typeof getSupabaseClient>) {
       .order('created_at', { ascending: false }),
     supabase
       .from('budgets')
-      .select('*')
+      .select('id, category, limit_amount, period, month_period, custom_aliases') // ← custom_aliases
       .order('category'),
     supabase
       .from('goals')
@@ -148,9 +142,15 @@ async function fetchAllData(supabase: ReturnType<typeof getSupabaseClient>) {
   if (budgetsRes.error)      throw new Error(`Presupuestos: ${budgetsRes.error.message}`);
   if (goalsRes.error)        throw new Error(`Metas: ${goalsRes.error.message}`);
 
+  // Garantizar que custom_aliases siempre sea array
+  const budgets = (budgetsRes.data || []).map((b: Record<string, unknown>) => ({
+    ...b,
+    custom_aliases: Array.isArray(b.custom_aliases) ? b.custom_aliases : [],
+  }));
+
   return {
     transactions: transactionsRes.data || [],
-    budgets:      budgetsRes.data      || [],
+    budgets,
     goals:        goalsRes.data        || [],
     accounts:     accountsRes.error    ? [] : (accountsRes.data     || []),
     installments: installmentsRes.error ? [] : (installmentsRes.data || []),
@@ -173,12 +173,12 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
   const supabase = supabaseRef.current;
 
   const applyData = useCallback(
-    (data: { transactions: any[]; budgets: any[]; goals: any[]; accounts: any[]; installments: any[] }) => {
-      setTransactions(data.transactions);
-      setBudgets(data.budgets);
-      setGoals(data.goals);
-      setAccounts(data.accounts);
-      setInstallments(data.installments);
+    (data: { transactions: unknown[]; budgets: unknown[]; goals: unknown[]; accounts: unknown[]; installments: unknown[] }) => {
+      setTransactions(data.transactions as SimpleTransaction[]);
+      setBudgets(data.budgets as SimpleBudget[]);
+      setGoals(data.goals as SimpleGoal[]);
+      setAccounts(data.accounts as SimpleAccount[]);
+      setInstallments(data.installments as SimpleInstallment[]);
       setError(null);
     },
     []
@@ -253,10 +253,8 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
     try {
       const userId = await getFreshUserId(supabase);
       if (!userId) { setError('Usuario no autenticado'); return false; }
-
       const { error } = await supabase.from('goals').insert({ ...data, is_completed: false, user_id: userId });
       if (error) { setError(error.message); return false; }
-
       applyData(await fetchAllData(supabase));
       return true;
     } catch (err) {
@@ -274,13 +272,12 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
             ? data.current_amount >= (data.target_amount ?? 0)
             : undefined;
 
-      const payload: any = { ...data };
+      const payload: Record<string, unknown> = { ...data };
       if (is_completed !== undefined) payload.is_completed = is_completed;
       else delete payload.is_completed;
 
       const { error } = await supabase.from('goals').update(payload).eq('id', id);
       if (error) { setError(error.message); return false; }
-
       applyData(await fetchAllData(supabase));
       return true;
     } catch (err) {
@@ -294,17 +291,19 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
   const createBudget = useCallback(async (
     category: string,
     limitAmount: number,
-    monthPeriod?: string
+    monthPeriod?: string,
+    customAliases: string[] = []  // ← NUEVO parámetro
   ): Promise<boolean> => {
     try {
       const userId = await getFreshUserId(supabase);
       if (!userId) { setError('Usuario no autenticado'); return false; }
 
       const { error } = await supabase.from('budgets').insert({
-        category:     category.toLowerCase().trim(),
-        limit_amount: limitAmount,
-        month_period: monthPeriod || new Date().toISOString().slice(0, 7),
-        user_id:      userId,
+        category:      category.toLowerCase().trim(),
+        limit_amount:  limitAmount,
+        month_period:  monthPeriod || new Date().toISOString().slice(0, 7),
+        user_id:       userId,
+        custom_aliases: customAliases,  // ← guardar aliases desde el inicio
       });
       if (error) { setError(error.message); return false; }
 
@@ -319,6 +318,19 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
   const updateBudget = useCallback(async (id: string, limitAmount: number): Promise<boolean> => {
     try {
       const { error } = await supabase.from('budgets').update({ limit_amount: limitAmount }).eq('id', id);
+      if (error) return false;
+      applyData(await fetchAllData(supabase));
+      return true;
+    } catch { return false; }
+  }, [applyData, supabase]);
+
+  // ← NUEVA función
+  const updateBudgetAliases = useCallback(async (id: string, aliases: string[]): Promise<boolean> => {
+    try {
+      const { error } = await supabase
+        .from('budgets')
+        .update({ custom_aliases: aliases })
+        .eq('id', id);
       if (error) return false;
       applyData(await fetchAllData(supabase));
       return true;
@@ -341,7 +353,6 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
       const userId = await getFreshUserId(supabase);
       if (!userId) { setError('Usuario no autenticado'); return null; }
 
-      // Garantizar unicidad de default por tipo
       if (data.is_default) {
         await supabase
           .from('accounts')
@@ -371,7 +382,6 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
         .single();
 
       if (error) { setError(error.message); return null; }
-
       applyData(await fetchAllData(supabase));
       return account as SimpleAccount;
     } catch (err) {
@@ -385,11 +395,9 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
       const userId = await getFreshUserId(supabase);
       if (!userId) { setError('Usuario no autenticado'); return false; }
 
-      // Obtener tipo de la cuenta a marcar como default
       const target = accounts.find((a) => a.id === id);
       if (!target) return false;
 
-      // Quitar default del mismo tipo
       await supabase
         .from('accounts')
         .update({ is_default: false })
@@ -397,7 +405,6 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
         .eq('type', target.type)
         .eq('is_default', true);
 
-      // Poner nuevo default
       const { error } = await supabase.from('accounts').update({ is_default: true }).eq('id', id);
       if (error) { setError(error.message); return false; }
 
@@ -423,6 +430,7 @@ export function useSimpleSupabase(): UseSimpleSupabaseReturn {
     updateBudget,
     createBudget,
     deleteBudget,
+    updateBudgetAliases,  // ← NUEVO
     setDefaultAccount,
     createAccount,
   };

@@ -6,6 +6,7 @@ import { useSimpleSupabase } from '../hooks/useSimpleSupabase';
 import type { SimpleBudget } from '../hooks/useSimpleSupabase';
 import { useSimpleAdaptedData } from '../hooks/useSimpleAdaptedData';
 import { formatCategoria } from '../lib/types';
+import { categoriasMatch, resolveCategory, generateAliasesForCustomCategory } from '../lib/category-aliases';
 import { supabase } from '../lib/supabase';
 import { recalcularAlAgregar } from './Onboarding';
 
@@ -22,54 +23,39 @@ const getColorByPercentage = (pct: number) => {
   return           { bg: 'bg-green-900/20',  text: 'text-green-400',  border: 'border-green-500/30',  bar: '#00C853', icon: '🟢' }
 }
 
-// ─── Emojis y labels ─────────────────────────────────────────
+// ─── Emojis ──────────────────────────────────────────────────
 const EMOJI: Record<string, string> = {
-  alimentacion: '🍔', supermercado: '🛒', transporte: '🚌',
-  salidas: '🎉', servicios: '💡', suscripciones: '📱',
+  alimentacion: '🍔', supermercado: '🛒', comida: '🍽️', delivery: '🛵',
+  transporte: '🚌', salidas: '🎉', servicios: '💡', suscripciones: '📱',
   salud: '🏥', ropa: '👕', gym: '💪', mascotas: '🐕',
-  educacion: '📚', otros: '📦',
+  educacion: '📚', hobbies: '🎨', viajes: '✈️', otros: '📦',
 }
 const getEmoji = (cat: string) => EMOJI[cat.toLowerCase().trim()] ?? '📦'
 
-// ─── Aliases fuzzy ───────────────────────────────────────────
-const ALIASES: Record<string, string[]> = {
-  alimentacion: ['super', 'supermercado', 'mercado', 'comida', 'almacen', 'verduleria', 'carniceria', 'panaderia', 'kiosco', 'delivery'],
-  transporte:   ['nafta', 'colectivo', 'subte', 'uber', 'taxi', 'remis', 'sube', 'combustible', 'peaje'],
-  salidas:      ['bar', 'restaurant', 'restaurante', 'cine', 'teatro', 'boliche', 'entretenimiento', 'salida'],
-  salud:        ['farmacia', 'medico', 'dentista', 'clinica', 'prepaga'],
-  servicios:    ['luz', 'gas', 'agua', 'internet', 'telefono', 'expensas'],
-}
+// ─── sugerirCategoria usando el sistema centralizado ─────────
+function sugerirCategoria(
+  descripcion: string,
+  userCategories: string[]
+): { sugerencia: string; label: string } | null {
+  const resolved = resolveCategory(descripcion.toLowerCase(), userCategories, {})
+  if (!resolved || resolved === 'otros') return null
 
-function categoriasMatch(bc: string, tc: string): boolean {
-  const b = bc.toLowerCase().trim()
-  const t = tc.toLowerCase().trim()
-  if (b === t) return true
-  if (t.includes(b) || b.includes(t)) return true
-  return ALIASES[b]?.includes(t) ?? false
-}
-
-// ─── Sugerencias de re-categorización para gastos en 'otros' ─
-const RECATEGORIZACION: Array<{ keywords: string[]; sugerencia: string; label: string }> = [
-  { keywords: ['super', 'mercado', 'almacen', 'verduleria', 'carniceria', 'panaderia', 'kiosco', 'comida', 'delivery', 'rappi', 'pedidosya'], sugerencia: 'alimentacion', label: 'Comida y delivery' },
-  { keywords: ['nafta', 'ypf', 'shell', 'axion', 'sube', 'colectivo', 'subte', 'uber', 'taxi', 'remis', 'peaje'], sugerencia: 'transporte', label: 'Transporte' },
-  { keywords: ['farmacia', 'medico', 'doctor', 'dentista', 'clinica', 'hospital', 'prepaga', 'osde', 'swiss'], sugerencia: 'salud', label: 'Salud' },
-  { keywords: ['netflix', 'spotify', 'disney', 'hbo', 'amazon', 'icloud', 'adobe', 'gym', 'gimnasio'], sugerencia: 'suscripciones', label: 'Suscripciones' },
-  { keywords: ['bar', 'restaurant', 'restaurante', 'cine', 'teatro', 'boliche', 'fiesta'], sugerencia: 'salidas', label: 'Salidas' },
-  { keywords: ['zara', 'h&m', 'adidas', 'nike', 'ropa', 'zapatillas', 'indumentaria'], sugerencia: 'ropa', label: 'Ropa' },
-]
-
-function sugerirCategoria(descripcion: string): { sugerencia: string; label: string } | null {
-  const desc = descripcion.toLowerCase()
-  for (const rule of RECATEGORIZACION) {
-    if (rule.keywords.some(kw => desc.includes(kw))) {
-      return { sugerencia: rule.sugerencia, label: rule.label }
-    }
+  const labels: Record<string, string> = {
+    alimentacion: 'Alimentación', supermercado: 'Supermercado', comida: 'Comida',
+    transporte: 'Transporte', salidas: 'Salidas', servicios: 'Servicios',
+    suscripciones: 'Suscripciones', salud: 'Salud', ropa: 'Ropa',
+    gym: 'Gym', mascotas: 'Mascotas', educacion: 'Educación',
+    hobbies: 'Hobbies', viajes: 'Viajes',
   }
-  return null
+
+  return {
+    sugerencia: resolved,
+    label: labels[resolved] ?? resolved.charAt(0).toUpperCase() + resolved.slice(1),
+  }
 }
 
 // ─── Umbral de alerta para 'otros' ───────────────────────────
-const OTROS_ALERT_PCT_OF_TOTAL = 0.25  // 25% del gasto total
+const OTROS_ALERT_PCT_OF_TOTAL = 0.25
 
 export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabProps) {
   const { budgets, loading, error, refresh, updateBudget, createBudget, deleteBudget } = useSimpleSupabase()
@@ -85,7 +71,7 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
 
   useEffect(() => {
     if (refreshTrigger && refreshTrigger > 0) refresh()
-  }, [refreshTrigger,refresh])
+  }, [refreshTrigger, refresh])
 
   useEffect(() => {
     const load = async () => {
@@ -101,36 +87,49 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
   const targetMonth     = selectedMonth || new Date().toISOString().slice(0, 7)
   const filteredBudgets = (budgets || []).filter(b => b.month_period === targetMonth)
 
-  // Separar 'otros' del resto para tratamiento especial
   const budgetsSinOtros = filteredBudgets.filter(b => b.category !== 'otros')
   const budgetOtros     = filteredBudgets.find(b => b.category === 'otros')
+
+  // ─── Mapas para el sistema de aliases (construidos una sola vez) ──
+  const userCategories = filteredBudgets.map(b => b.category)
+  const budgetAliasesMap: Record<string, string[]> = {}
+  for (const b of filteredBudgets) {
+    budgetAliasesMap[b.category] = b.custom_aliases ?? []
+  }
 
   const getSpent = (budget: SimpleBudget) => {
     if (!transactions) return 0
     return transactions
       .filter(t => {
-        const tc    = typeof t.categoria === 'string' ? t.categoria : t.categoria?.id || t.categoria?.nombre || ''
+        const tc = typeof t.categoria === 'string'
+          ? t.categoria
+          : (t.categoria as { id?: string; nombre?: string })?.id
+            || (t.categoria as { id?: string; nombre?: string })?.nombre
+            || ''
         const monthOk = t.fecha?.startsWith(targetMonth)
-        const catOk   = categoriasMatch(budget.category, tc)
+        const catOk   = categoriasMatch(budget.category, tc, userCategories, budgetAliasesMap)
         return catOk && monthOk && t.tipo === 'gasto'
       })
       .reduce((s, t) => s + (Number(t.monto) || 0), 0)
   }
 
-  // Total gastado en todas las categorías (para calcular % de 'otros')
   const totalGastado = filteredBudgets.reduce((s, b) => s + getSpent(b), 0)
 
-  // Gastos de 'otros' para sugerencias de re-categorización
   const gastosEnOtros = budgetOtros
     ? (transactions || []).filter(t => {
-        const tc = typeof t.categoria === 'string' ? t.categoria : t.categoria?.id || t.categoria?.nombre || ''
-        return categoriasMatch('otros', tc) && t.fecha?.startsWith(targetMonth) && t.tipo === 'gasto'
+        const tc = typeof t.categoria === 'string'
+          ? t.categoria
+          : (t.categoria as { id?: string; nombre?: string })?.id
+            || (t.categoria as { id?: string; nombre?: string })?.nombre
+            || ''
+        return categoriasMatch('otros', tc, userCategories, budgetAliasesMap)
+          && t.fecha?.startsWith(targetMonth)
+          && t.tipo === 'gasto'
       })
     : []
 
-  // Sugerencias de re-categorización (solo si hay gastos en 'otros' con datos claros)
   const sugerencias = gastosEnOtros
-    .map(t => ({ tx: t, sug: sugerirCategoria(t.descripcion || '') }))
+    .map(t => ({ tx: t, sug: sugerirCategoria(t.descripcion || '', userCategories) }))
     .filter(({ sug }) => sug !== null)
     .slice(0, 3)
 
@@ -147,6 +146,9 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
 
   const handleCreateBudget = async () => {
     if (!newBudget.category || newBudget.limit <= 0) return
+
+    // Generar aliases automáticos para categorías no reconocidas por el sistema global
+    const autoAliases = generateAliasesForCustomCategory(newBudget.category)
 
     const disponible = onboardingData.ingreso_mensual - onboardingData.objetivo_ahorro
 
@@ -165,9 +167,14 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
         }
       }
 
-      await createBudget(newBudget.category, mapaRecalculado[newBudget.category] ?? newBudget.limit, targetMonth)
+      await createBudget(
+        newBudget.category,
+        mapaRecalculado[newBudget.category] ?? newBudget.limit,
+        targetMonth,
+        autoAliases
+      )
     } else {
-      await createBudget(newBudget.category, newBudget.limit, targetMonth)
+      await createBudget(newBudget.category, newBudget.limit, targetMonth, autoAliases)
     }
 
     setShowCreateModal(false)
@@ -281,7 +288,7 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
           </p>
         </div>
 
-        {/* Alerta de exceso — solo para categorías normales */}
+        {/* Alerta de exceso */}
         {!isOtros && pct >= 85 && (
           <div className={`px-3 py-2 rounded-lg text-xs flex items-center gap-2 ${pct >= 100 ? 'bg-red-500/15 text-red-400' : 'bg-orange-500/15 text-orange-400'}`}>
             <AlertTriangle size={12} />
@@ -296,8 +303,14 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
             {(() => {
               const txs = (transactions || [])
                 .filter(t => {
-                  const tc = typeof t.categoria === 'string' ? t.categoria : t.categoria?.id || t.categoria?.nombre || ''
-                  return categoriasMatch(budget.category, tc) && t.tipo === 'gasto' && t.fecha?.startsWith(targetMonth)
+                  const tc = typeof t.categoria === 'string'
+                    ? t.categoria
+                    : (t.categoria as { id?: string; nombre?: string })?.id
+                      || (t.categoria as { id?: string; nombre?: string })?.nombre
+                      || ''
+                  return categoriasMatch(budget.category, tc, userCategories, budgetAliasesMap)
+                    && t.tipo === 'gasto'
+                    && t.fecha?.startsWith(targetMonth)
                 })
                 .sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime())
                 .slice(0, 5)
@@ -338,14 +351,14 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
         </button>
       </div>
 
-      {/* ── Budgets principales (sin 'otros') ── */}
+      {/* Budgets principales */}
       {budgetsSinOtros.length > 0 && (
         <div className="space-y-3">
           {budgetsSinOtros.map(b => renderBudgetCard(b, false))}
         </div>
       )}
 
-      {/* ── Alerta especial de 'otros' si supera umbral ── */}
+      {/* Alerta especial de 'otros' si supera umbral */}
       {budgetOtros && (() => {
         const spentOtros = getSpent(budgetOtros)
         const pctDeTotal = totalGastado > 0 ? spentOtros / totalGastado : 0
@@ -368,7 +381,7 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
         )
       })()}
 
-      {/* ── Sugerencias de re-categorización ── */}
+      {/* Sugerencias de re-categorización */}
       {sugerencias.length > 0 && (
         <div className="bg-white/3 border border-white/8 rounded-xl px-4 py-3 space-y-2">
           <p className="text-white/40 text-xs font-medium">💡 Estos gastos podrían tener mejor categoría:</p>
@@ -397,14 +410,14 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
         </div>
       )}
 
-      {/* ── Budget 'otros' al final, visualmente secundario ── */}
+      {/* Budget 'otros' al final */}
       {budgetOtros && (
         <div className="opacity-60 hover:opacity-80 transition-opacity">
           {renderBudgetCard(budgetOtros, true)}
         </div>
       )}
 
-      {/* ── Estado vacío ── */}
+      {/* Estado vacío */}
       {filteredBudgets.length === 0 && (() => {
         const ingreso  = onboardingData.ingreso_mensual || 0
         const objetivo = onboardingData.objetivo_ahorro || 0
@@ -454,7 +467,7 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
         )
       })()}
 
-      {/* ── Modal crear ── */}
+      {/* Modal crear */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 px-4">
           <div className="bg-[#141A17] border border-white/10 rounded-2xl p-6 w-full max-w-sm">
@@ -500,7 +513,6 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
                 </div>
               </div>
 
-              {/* Aviso de recálculo si hay presupuestos existentes */}
               {filteredBudgets.length > 0 && onboardingData.ingreso_mensual > 0 && (
                 <div className="bg-white/3 border border-white/8 rounded-xl px-3 py-2.5">
                   <p className="text-white/30 text-[11px] leading-relaxed">
@@ -529,7 +541,7 @@ export default function BudgetTab({ selectedMonth, refreshTrigger }: BudgetTabPr
         </div>
       )}
 
-      {/* ── Modal editar ── */}
+      {/* Modal editar */}
       {showEditModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 px-4">
           <div className="bg-[#141A17] border border-white/10 rounded-2xl p-6 w-full max-w-sm">
