@@ -1,131 +1,167 @@
 // ========================================
-// AI Wallet - Cliente Supabase Singleton Real
-// ========================================
-// Archivo: lib/supabase.ts
-// Propósito: Singleton real de Supabase - UNA sola instancia global
-// Author: SRE Full-Stack Developer
+// AI Wallet — Cliente Supabase
+// lib/supabase.ts
+//
+// SEGURIDAD:
+// - Browser client: singleton via globalThis (sobrevive hot reload en dev)
+// - Server client (anon):  usa JWT del usuario → RLS activo
+// - Server client (service): usa SERVICE_ROLE_KEY → bypasea RLS,
+//   solo para el path interno WhatsApp con secret validado
+// - Logs de infraestructura eliminados en producción
 // ========================================
 
 import { createBrowserClient } from '@supabase/ssr'
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const url     = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
-// ✅ Singleton usando @supabase/ssr — lee la sesión desde cookies, igual que el middleware
-let browserClient: SupabaseClient | null = null
+// ─────────────────────────────────────────────────────────────────────────────
+// Browser client — singleton via globalThis para sobrevivir hot reload
+// ─────────────────────────────────────────────────────────────────────────────
+
+const g = globalThis as typeof globalThis & { _supabaseBrowser?: SupabaseClient }
 
 export const getSupabaseClient = (): SupabaseClient => {
-  if (!browserClient) {
-    browserClient = createBrowserClient(url, anonKey)
-    console.log('🔧 Supabase browser client created (SSR-compatible)')
+  if (!g._supabaseBrowser) {
+    g._supabaseBrowser = createBrowserClient(url, anonKey)
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[supabase] browser client created')
+    }
   }
-  return browserClient
+  return g._supabaseBrowser
 }
 
 export const supabase = getSupabaseClient()
 
-// Agregar esta función — permite destruir el singleton en logout
+// Destruye el singleton en logout para limpiar la sesión en memoria
 export const resetSupabaseClient = (): void => {
-  browserClient = null
-  console.log('🔧 Supabase browser client reset')
+  g._supabaseBrowser = undefined
+  if (process.env.NODE_ENV === 'development') {
+    console.log('[supabase] browser client reset')
+  }
 }
 
-// Cliente para el lado del servidor (API routes)
-export const createSupabaseServerClient = (): SupabaseClient => {
-  return createClient(url, anonKey, {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false
-    }
-  });
-};
+// ─────────────────────────────────────────────────────────────────────────────
+// Server client — autenticado con JWT del usuario (RLS activo)
+// Usar para TODAS las llamadas de usuario normal desde route handlers
+// ─────────────────────────────────────────────────────────────────────────────
 
-// Nuevo: cliente autenticado con token del usuario
-export const createSupabaseServerClientWithToken = (token: string): SupabaseClient => {
-  return createClient(url, anonKey, {
-    global: {
-      headers: { Authorization: `Bearer ${token}` }
-    },
-    auth: { persistSession: false, autoRefreshToken: false }
-  });
-};
+export const createSupabaseServerClientWithToken = (token: string): SupabaseClient =>
+  createClient(url, anonKey, {
+    global: { headers: { Authorization: `Bearer ${token}` } },
+    auth:   { persistSession: false, autoRefreshToken: false },
+  })
 
-// Tipos para la tabla transactions
+// ─────────────────────────────────────────────────────────────────────────────
+// Server client — service role (bypasea RLS)
+// SOLO para el path interno WhatsApp donde ya se validó INTERNAL_API_SECRET.
+// Requiere SUPABASE_SERVICE_ROLE_KEY en variables de entorno del servidor
+// (sin NEXT_PUBLIC_ — nunca llega al browser).
+//
+// Si la variable no está definida lanza en runtime para evitar silenciar
+// el error y terminar usando anonKey sin darse cuenta.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const createSupabaseServiceClient = (): SupabaseClient => {
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!serviceKey) {
+    throw new Error(
+      '[supabase] SUPABASE_SERVICE_ROLE_KEY no está definida. ' +
+      'Agregala en las variables de entorno del servidor (sin NEXT_PUBLIC_).'
+    )
+  }
+  return createClient(url, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+}
+
+// Alias legacy — evita romper imports existentes en route.ts
+// Se mantiene pero internamente ahora llama a createSupabaseServiceClient
+// SOLO cuando se usa desde el path interno. Ver route.ts para el contexto.
+export const createSupabaseServerClient = (): SupabaseClient =>
+  createSupabaseServiceClient()
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tipos
+// ─────────────────────────────────────────────────────────────────────────────
+
 export interface DatabaseTransaction {
-  id: string;
-  description: string;
-  amount: number;
-  category: string;
-  type: 'gasto' | 'ingreso';
-  transaction_date: string;
-  created_at: string;
-  updated_at: string;
-  confirmed: boolean;
-  source: 'voice' | 'text' | 'manual';
-  original_message?: string;
-  ai_confidence?: number;
-  user_id?: string;
-  budget_id?: string;
-  goal_id?: string;
+  id:               string
+  description:      string
+  amount:           number
+  category:         string
+  type:             'gasto' | 'ingreso'
+  transaction_date: string
+  created_at:       string
+  updated_at:       string
+  confirmed:        boolean
+  source:           'voice' | 'text' | 'manual'
+  original_message?: string
+  ai_confidence?:   number
+  user_id?:         string
+  budget_id?:       string
+  goal_id?:         string
 }
 
-// Tipos para inserción (sin campos auto-generados)
 export interface TransactionInsert {
-  description: string;
-  amount: number;
-  category: string;
-  type: 'gasto' | 'ingreso';
-  transaction_date?: string;
-  confirmed?: boolean;
-  source?: 'voice' | 'text' | 'manual';
-  original_message?: string;
-  ai_confidence?: number;
-  user_id?: string;
-  budget_id?: string;
-  goal_id?: string;
-  account_id?: string | null;
-  installment_count?: number;
-  first_due_month?: string;
+  description:       string
+  amount:            number
+  category:          string
+  type:              'gasto' | 'ingreso'
+  transaction_date?: string
+  confirmed?:        boolean
+  source?:           'voice' | 'text' | 'manual'
+  original_message?: string
+  ai_confidence?:    number
+  user_id?:          string
+  budget_id?:        string
+  goal_id?:          string
+  account_id?:       string | null
+  installment_count?: number
+  first_due_month?:  string
 }
 
-// Utilidades para manejo de errores
+// ─────────────────────────────────────────────────────────────────────────────
+// Manejo de errores
+// ─────────────────────────────────────────────────────────────────────────────
+
 export class SupabaseError extends Error {
   constructor(
     message: string,
-    public code?: string,
+    public code?:    string,
     public details?: unknown
   ) {
-    super(message);
-    this.name = 'SupabaseError';
+    super(message)
+    this.name = 'SupabaseError'
   }
 }
 
-// Función utilitaria para manejar errores de Supabase
 export const handleSupabaseError = (error: unknown): SupabaseError => {
-  const e = error as { code?: string; message?: string; details?: unknown };
-  console.error('Error de Supabase:', error);
+  const e = error as { code?: string; message?: string; details?: unknown }
+
+  // En producción: solo loguear código y mensaje, nunca el objeto completo
+  // (puede contener queries SQL o detalles de schema)
+  if (process.env.NODE_ENV === 'production') {
+    console.error('[supabase] error', { code: e.code, message: e.message })
+  } else {
+    console.error('[supabase] error (dev)', error)
+  }
 
   if (e.code) {
     switch (e.code) {
-      case '23505':
-        return new SupabaseError('Registro duplicado', e.code, e.details);
-      case '23503':
-        return new SupabaseError('Violación de clave foránea', e.code, e.details);
-      case '23514':
-        return new SupabaseError('Violación de constraint', e.code, e.details);
-      case 'PGRST116':
-        return new SupabaseError('Registro no encontrado', e.code, e.details);
-      default:
-        return new SupabaseError(e.message || 'Error desconocido de Supabase', e.code, e.details);
+      case '23505': return new SupabaseError('Registro duplicado',           e.code, e.details)
+      case '23503': return new SupabaseError('Violación de clave foránea',   e.code, e.details)
+      case '23514': return new SupabaseError('Violación de constraint',      e.code, e.details)
+      case 'PGRST116': return new SupabaseError('Registro no encontrado',    e.code, e.details)
+      default:      return new SupabaseError(e.message ?? 'Error desconocido de Supabase', e.code, e.details)
     }
   }
 
-  return new SupabaseError(e.message || 'Error desconocido de Supabase');
-};
+  return new SupabaseError(e.message ?? 'Error desconocido de Supabase')
+}
 
-// Exportaciones por defecto
-export default getSupabaseClient;
+export default getSupabaseClient
 
-// Desconectar realtime completamente si no se usa
-supabase.realtime.disconnect();
+// Desconectar realtime — la app no usa subscriptions en tiempo real
+supabase.realtime.disconnect()

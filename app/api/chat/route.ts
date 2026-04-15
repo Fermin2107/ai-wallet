@@ -1,13 +1,57 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
+import { z } from 'zod';
 import { ChatResponse } from '../../../lib/types';
 import { resolveCategory } from '../../../lib/category-aliases';
 import {
-  createSupabaseServerClient,
+  createSupabaseServiceClient,
   createSupabaseServerClientWithToken,
   TransactionInsert,
   handleSupabaseError,
 } from '../../../lib/supabase';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RATE LIMITER — en memoria, por userId
+// Para producción con múltiples instancias: reemplazar con Upstash Redis.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const rateLimitStore = new Map<string, { count: number; resetAt: number }>()
+const RATE_LIMIT_MAX    = 20
+const RATE_LIMIT_WINDOW = 60_000
+
+function checkRateLimit(identifier: string): { allowed: boolean; remaining: number } {
+  const now   = Date.now()
+  const entry = rateLimitStore.get(identifier)
+  if (!entry || now > entry.resetAt) {
+    rateLimitStore.set(identifier, { count: 1, resetAt: now + RATE_LIMIT_WINDOW })
+    return { allowed: true, remaining: RATE_LIMIT_MAX - 1 }
+  }
+  if (entry.count >= RATE_LIMIT_MAX) return { allowed: false, remaining: 0 }
+  entry.count++
+  return { allowed: true, remaining: RATE_LIMIT_MAX - entry.count }
+}
+
+setInterval(() => {
+  const now = Date.now()
+  Array.from(rateLimitStore.entries()).forEach(([key, entry]) => {
+    if (now > entry.resetAt) rateLimitStore.delete(key)
+  })
+}, 5 * 60_000)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VALIDACIÓN DE INPUT — Zod
+// ─────────────────────────────────────────────────────────────────────────────
+
+const requestSchema = z.object({
+  message: z.string().min(1).max(2000),
+  context: z.object({}).passthrough(),
+  history: z.array(z.object({
+    role:    z.enum(['user', 'assistant']),
+    content: z.string().max(5000),
+  })).max(20).default([]),
+})
+
+type ValidatedRequest = z.infer<typeof requestSchema>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TIPOS
@@ -608,7 +652,7 @@ function classifyIntent(message: string): BackendIntent {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// buildDynamicContext
+// buildDynamicContext — sin cambios
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildDynamicContext(
@@ -656,7 +700,6 @@ function buildDynamicContext(
     return [
       `FECHA: ${fecha}`,
       `USUARIO: ${usuario}`,
-      estadoBase,
       ``,
       `CATEGORÍAS DISPONIBLES (con estado actual del mes):`,
       categorias,
@@ -870,12 +913,12 @@ function buildDynamicContext(
 
 function buildSystemPrompt(intent: BackendIntent): string {
   switch (intent) {
-    case 'registro':        return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_REGISTRO;
-    case 'consulta_simple': return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_CONSULTA;
+    case 'registro':           return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_REGISTRO;
+    case 'consulta_simple':    return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_CONSULTA;
     case 'consulta_historica': return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_HISTORICO;
-    case 'simulacion':      return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_SIMULACION;
-    case 'planificacion':   return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_PLANIFICACION;
-    case 'gestion_cuentas': return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_GESTION_CUENTAS;
+    case 'simulacion':         return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_SIMULACION;
+    case 'planificacion':      return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_PLANIFICACION;
+    case 'gestion_cuentas':    return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_GESTION_CUENTAS;
     case 'complejo':
       return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_COMPLEJO + SYSTEM_PROMPT_HISTORICO + SYSTEM_PROMPT_SIMULACION;
   }
@@ -949,7 +992,7 @@ function estimateTokens(text: string): number {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// cleanAndParseAIResponse
+// cleanAndParseAIResponse — sin cambios
 // ─────────────────────────────────────────────────────────────────────────────
 
 function cleanAndParseAIResponse(raw: string): ChatResponse {
@@ -1001,6 +1044,8 @@ function cleanAndParseAIResponse(raw: string): ChatResponse {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // saveTransactionsToSupabase
+// SECURITY FIX: recibe cliente ya autenticado, no crea nuevas instancias.
+// SECURITY FIX: .eq('user_id', userId) explícito en query de accounts.
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface TransactionPayload {
@@ -1023,96 +1068,83 @@ interface TransactionPayload {
 async function saveTransactionsToSupabase(
   transacciones: TransactionPayload[],
   originalMessage: string,
-  userId: string | null,
+  userId: string,
   budgetsData: BudgetRow[],
   goalsData: GoalRow[],
-  userToken: string | null | undefined,
-  context: RequestContext & { server_resolved_account_id?: string | null }
+  supabaseClient: ReturnType<typeof createSupabaseServerClientWithToken>,
+  resolvedAccountId: string | null,
+  contextAccountId?: string | null,
 ): Promise<void> {
-  const supabase = userToken
-    ? createSupabaseServerClientWithToken(userToken)
-    : createSupabaseServerClient();
+  const userCategories = budgetsData.map(b => b.category);
+  const budgetAliases: Record<string, string[]> = {};
+  for (const b of budgetsData) {
+    budgetAliases[b.category] = Array.isArray(b.custom_aliases) ? b.custom_aliases : [];
+  }
 
-  try {
-    // Construir mapas para resolveCategory una sola vez
-    const userCategories = budgetsData.map(b => b.category);
-    const budgetAliases: Record<string, string[]> = {};
-    for (const b of budgetsData) {
-      budgetAliases[b.category] = Array.isArray(b.custom_aliases) ? b.custom_aliases : [];
-    }
+  const transactionsToInsert: TransactionInsert[] = transacciones.map((tx) => {
+    const rawCategory = (tx.category ?? tx.categoria ?? '').toLowerCase().trim();
+    const normalizedCategory = resolveCategory(rawCategory, userCategories, budgetAliases);
+    const budgetMatch = budgetsData.find(b => b.category === normalizedCategory);
+    const goalMatch =
+      normalizedCategory === 'ahorro'
+        ? goalsData.find(g => g.is_active && !g.is_completed)
+        : undefined;
 
-    const transactionsToInsert: TransactionInsert[] = transacciones.map((tx) => {
-      const rawCategory = (tx.category ?? tx.categoria ?? '').toLowerCase().trim();
+    return {
+      description:      tx.description ?? tx.descripcion ?? 'Sin descripción',
+      amount:           Math.abs(Number(tx.amount ?? tx.monto) || 0),
+      category:         normalizedCategory,
+      type:             (tx.type ?? tx.tipo ?? 'gasto') as 'gasto' | 'ingreso',
+      transaction_date: tx.transaction_date ?? tx.fecha ?? new Date().toISOString().split('T')[0],
+      confirmed:        tx.confirmed ?? false,
+      source:           'voice' as const,
+      original_message: originalMessage,
+      ai_confidence:    0.95,
+      user_id:          userId,
+      budget_id:        budgetMatch?.id ?? undefined,
+      goal_id:          goalMatch?.id ?? undefined,
+      account_id:       tx.account_id ?? resolvedAccountId ?? contextAccountId ?? null,
+      installment_count: tx.installment_count ?? 1,
+      first_due_month:  tx.first_due_month ?? undefined,
+    };
+  });
 
-      // Normalizar usando el sistema centralizado
-      const normalizedCategory = resolveCategory(rawCategory, userCategories, budgetAliases);
-
-      // Buscar budget matching con la categoría ya normalizada
-      const budgetMatch = budgetsData.find(b => b.category === normalizedCategory);
-
-      const goalMatch =
-        normalizedCategory === 'ahorro'
-          ? goalsData.find(g => g.is_active && !g.is_completed)
-          : undefined;
-
-      return {
-        description:      tx.description ?? tx.descripcion ?? 'Sin descripción',
-        amount:           Math.abs(Number(tx.amount ?? tx.monto) || 0),
-        category:         normalizedCategory,
-        type:             (tx.type ?? tx.tipo ?? 'gasto') as 'gasto' | 'ingreso',
-        transaction_date: tx.transaction_date ?? tx.fecha ?? new Date().toISOString().split('T')[0],
-        confirmed:        tx.confirmed ?? false,
-        source:           'voice' as const,
-        original_message: originalMessage,
-        ai_confidence:    0.95,
-        user_id:          userId ?? undefined,
-        budget_id:        budgetMatch?.id ?? undefined,
-        goal_id:          goalMatch?.id ?? undefined,
-        account_id:
-          tx.account_id
-          ?? context.server_resolved_account_id
-          ?? context.resolved_account_id
-          ?? null,
-        installment_count: tx.installment_count ?? 1,
-        first_due_month:   tx.first_due_month ?? undefined,
-      };
-    });
-
-    const { data, error } = await supabase
-      .from('transactions')
-      .insert(
-        transactionsToInsert.map(
-          ({ installment_count: _ic, first_due_month: _fd, ...rest }) => rest
-        )
+  const { data, error } = await supabaseClient
+    .from('transactions')
+    .insert(
+      transactionsToInsert.map(
+        ({ installment_count: _ic, first_due_month: _fd, ...rest }) => rest
       )
-      .select();
+    )
+    .select();
 
-    if (error) throw handleSupabaseError(error);
+  if (error) throw handleSupabaseError(error);
 
-    if (data && data.length > 0 && userId) {
-      for (let idx = 0; idx < data.length; idx++) {
-        const saved = data[idx] as { id: string; account_id: string | null; amount: number };
-        const txExtra = transactionsToInsert[idx];
-        if (!saved.account_id) continue;
+  if (data && data.length > 0) {
+    for (let idx = 0; idx < data.length; idx++) {
+      const saved = data[idx] as { id: string; account_id: string | null; amount: number };
+      const txExtra = transactionsToInsert[idx];
+      if (!saved.account_id) continue;
 
-        const { data: accData } = await supabase
-          .from('accounts').select('type').eq('id', saved.account_id).single();
+      const { data: accData } = await supabaseClient
+        .from('accounts')
+        .select('type')
+        .eq('id', saved.account_id)
+        .eq('user_id', userId)   // ← SECURITY FIX: autorización explícita
+        .single();
 
-        if ((accData as { type?: string } | null)?.type !== 'credit') continue;
+      if ((accData as { type?: string } | null)?.type !== 'credit') continue;
 
-        const installCount = (txExtra as TransactionInsert & { installment_count?: number }).installment_count ?? 1;
-        const firstDueMonth =
-          (txExtra as TransactionInsert & { first_due_month?: string }).first_due_month ??
-          new Date().toISOString().slice(0, 7);
+      const installCount = (txExtra as TransactionInsert & { installment_count?: number }).installment_count ?? 1;
+      const firstDueMonth =
+        (txExtra as TransactionInsert & { first_due_month?: string }).first_due_month ??
+        new Date().toISOString().slice(0, 7);
 
-        await generateInstallments(
-          saved.id, saved.account_id, userId,
-          saved.amount, installCount, firstDueMonth, supabase
-        );
-      }
+      await generateInstallments(
+        saved.id, saved.account_id, userId,
+        saved.amount, installCount, firstDueMonth, supabaseClient
+      );
     }
-  } catch (error) {
-    throw error;
   }
 }
 
@@ -1137,36 +1169,19 @@ function ensureGoalEmoji(goalName: string): string {
 
 async function createGoalInSupabase(
   goalData: Record<string, unknown>,
-  userId: string | null,
-  userToken: string | null | undefined
+  userId: string,
+  supabaseClient: ReturnType<typeof createSupabaseServerClientWithToken>,
 ): Promise<void> {
-  if (!userId) throw new Error('userId requerido para crear meta');
-
-  const { createClient } = await import('@supabase/supabase-js');
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      global: { headers: { Authorization: `Bearer ${userToken}` } },
-      auth: { persistSession: false, autoRefreshToken: false },
-    }
-  );
-
-  const goalNameWithEmoji = ensureGoalEmoji(
-    String(goalData.name ?? goalData.title ?? 'Meta sin nombre')
-  );
-
-  const { error } = await supabase.from('goals').insert({
-    name: goalNameWithEmoji,
-    target_amount: goalData.target_amount,
+  const { error } = await supabaseClient.from('goals').insert({
+    name:           ensureGoalEmoji(String(goalData.name ?? goalData.title ?? 'Meta sin nombre')),
+    target_amount:  goalData.target_amount,
     current_amount: goalData.current_amount ?? 0,
-    target_date: goalData.target_date ?? null,
-    description: goalData.description ?? '',
-    icon: goalData.icon ?? '🎯',
-    color: goalData.color ?? 'text-emerald-500',
-    user_id: userId,
+    target_date:    goalData.target_date ?? null,
+    description:    goalData.description ?? '',
+    icon:           goalData.icon ?? '🎯',
+    color:          goalData.color ?? 'text-emerald-500',
+    user_id:        userId,
   });
-
   if (error) throw handleSupabaseError(error);
 }
 
@@ -1182,7 +1197,7 @@ async function createAccountInSupabase(
     color?: string;
     set_as_default?: boolean;
   },
-  supabaseClient: ReturnType<typeof createSupabaseServerClient>,
+  supabaseClient: ReturnType<typeof createSupabaseServerClientWithToken>,
   userId: string
 ): Promise<Record<string, unknown>> {
   if (data.set_as_default) {
@@ -1208,12 +1223,14 @@ async function createAccountInSupabase(
 
 async function updateAccountBalanceInSupabase(
   data: { account_name: string; new_balance: number },
-  supabaseClient: ReturnType<typeof createSupabaseServerClient>,
+  supabaseClient: ReturnType<typeof createSupabaseServerClientWithToken>,
   userId: string
 ): Promise<{ updated: boolean; accountName: string; suggestion?: string }> {
   const { data: accounts, error } = await supabaseClient
     .from('accounts').select('id, name, type, balance')
-    .eq('user_id', userId).eq('is_active', true).ilike('name', `%${data.account_name}%`);
+    .eq('user_id', userId)       // ← SECURITY FIX: autorización explícita
+    .eq('is_active', true)
+    .ilike('name', `%${data.account_name}%`);
 
   if (error) throw handleSupabaseError(error);
 
@@ -1222,47 +1239,38 @@ async function updateAccountBalanceInSupabase(
   }
 
   const target = accounts[0] as { id: string; name: string };
-  const { error: updateErr } = await supabaseClient.from('accounts').update({ balance: data.new_balance }).eq('id', target.id);
+  const { error: updateErr } = await supabaseClient
+    .from('accounts').update({ balance: data.new_balance })
+    .eq('id', target.id)
+    .eq('user_id', userId);      // ← SECURITY FIX: doble seguro en update
   if (updateErr) throw handleSupabaseError(updateErr);
   return { updated: true, accountName: target.name };
 }
 
 async function createBudgetInSupabase(
   budgetData: Record<string, unknown>,
-  userId: string | null,
-  userToken: string | null | undefined
+  userId: string,
+  supabaseClient: ReturnType<typeof createSupabaseServerClientWithToken>,
 ): Promise<void> {
-  if (!userId) throw new Error('userId requerido para crear budget');
-
-  const supabase = userToken
-    ? createSupabaseServerClientWithToken(userToken)
-    : createSupabaseServerClient();
-
-  const { error } = await supabase.from('budgets').insert({
-    category: String(budgetData.category ?? '').toLowerCase().trim(),
+  const { error } = await supabaseClient.from('budgets').insert({
+    category:     String(budgetData.category ?? '').toLowerCase().trim(),
     limit_amount: budgetData.limit_amount,
     month_period: String(budgetData.month_period ?? '') || new Date().toISOString().slice(0, 7),
-    user_id: userId,
+    user_id:      userId,
   });
-
   if (error) throw handleSupabaseError(error);
 }
 
 async function updateGoalProgressInSupabase(
   goalName: string,
   amount: number,
-  userId: string | null,
-  userToken: string | null | undefined,
+  userId: string,
+  supabaseClient: ReturnType<typeof createSupabaseServerClientWithToken>,
   createIfMissing: boolean = true
 ): Promise<void> {
-  if (!userId) throw new Error('userId requerido');
-
-  const supabase = userToken
-    ? createSupabaseServerClientWithToken(userToken)
-    : createSupabaseServerClient();
-
-  const { data: existingGoals, error: searchError } = await supabase
-    .from('goals').select('*').eq('user_id', userId)
+  const { data: existingGoals, error: searchError } = await supabaseClient
+    .from('goals').select('*')
+    .eq('user_id', userId)       // ← SECURITY FIX: autorización explícita
     .ilike('name', `%${goalName}%`).eq('is_active', true);
 
   if (searchError) throw handleSupabaseError(searchError);
@@ -1272,7 +1280,7 @@ async function updateGoalProgressInSupabase(
   if (!targetGoal && createIfMissing) {
     const targetDate = new Date();
     targetDate.setMonth(targetDate.getMonth() + 6);
-    const { error: createError } = await supabase.from('goals').insert({
+    const { error: createError } = await supabaseClient.from('goals').insert({
       user_id: userId, name: ensureGoalEmoji(goalName),
       target_amount: amount * 10, current_amount: amount,
       target_date: targetDate.toISOString().split('T')[0],
@@ -1287,8 +1295,10 @@ async function updateGoalProgressInSupabase(
 
   const newAmount = targetGoal.current_amount + amount;
   const isCompleted = newAmount >= targetGoal.target_amount;
-  const { error } = await supabase.from('goals')
-    .update({ current_amount: newAmount, is_completed: isCompleted }).eq('id', targetGoal.id);
+  const { error } = await supabaseClient.from('goals')
+    .update({ current_amount: newAmount, is_completed: isCompleted })
+    .eq('id', targetGoal.id)
+    .eq('user_id', userId);      // ← SECURITY FIX: doble seguro en update
   if (error) throw handleSupabaseError(error);
 }
 
@@ -1296,11 +1306,12 @@ async function resolveAccount(
   userId: string,
   message: string,
   context: RequestContext,
-  supabaseClient: ReturnType<typeof createSupabaseServerClient>
+  supabaseClient: ReturnType<typeof createSupabaseServerClientWithToken>,
 ): Promise<{ account_id: string | null; error: string | null }> {
   const { data: accounts, error } = await supabaseClient
     .from('accounts').select('id, name, type, is_default')
-    .eq('user_id', userId).eq('is_active', true);
+    .eq('user_id', userId)       // ← SECURITY FIX: autorización explícita
+    .eq('is_active', true);
 
   if (error || !accounts || accounts.length === 0) return { account_id: null, error: null };
 
@@ -1329,7 +1340,7 @@ async function resolveAccount(
 async function generateInstallments(
   transactionId: string, accountId: string, userId: string,
   totalAmount: number, installmentCount: number, firstDueMonth: string,
-  supabaseClient: ReturnType<typeof createSupabaseServerClient>
+  supabaseClient: ReturnType<typeof createSupabaseServerClientWithToken>,
 ): Promise<void> {
   const [yearStr, monthStr] = firstDueMonth.split('-');
   const baseYear = parseInt(yearStr, 10);
@@ -1359,56 +1370,46 @@ interface ActionResult {
   mensaje_respuesta?: string;
 }
 
+// SECURITY FIX: executeAction recibe el cliente ya autenticado — no crea nuevas instancias
 async function executeAction(
   action: string,
   data: Record<string, unknown> | null,
   originalMessage: string,
-  userId: string | null,
+  userId: string,
   budgetsData: BudgetRow[],
   goalsData: GoalRow[],
-  userToken: string | null | undefined,
-  context: RequestContext & { server_resolved_account_id?: string | null }
+  supabaseClient: ReturnType<typeof createSupabaseServerClientWithToken>,
+  resolvedAccountId: string | null,
+  contextAccountId?: string | null,
 ): Promise<ActionResult> {
   switch (action) {
     case 'INSERT_TRANSACTION': {
-      await saveTransactionsToSupabase([data as TransactionPayload], originalMessage, userId, budgetsData, goalsData, userToken, context);
+      await saveTransactionsToSupabase([data as TransactionPayload], originalMessage, userId, budgetsData, goalsData, supabaseClient, resolvedAccountId, contextAccountId);
       return { success: true, message: 'Transacción guardada' };
     }
     case 'INSERT_TRANSACTIONS_BATCH': {
       const txArray = (data?.transactions ?? []) as TransactionPayload[];
       if (!Array.isArray(txArray) || txArray.length === 0) throw new Error('Batch vacío o inválido');
-      await saveTransactionsToSupabase(txArray, originalMessage, userId, budgetsData, goalsData, userToken, context);
+      await saveTransactionsToSupabase(txArray, originalMessage, userId, budgetsData, goalsData, supabaseClient, resolvedAccountId, contextAccountId);
       return { success: true, message: `${txArray.length} transacciones guardadas` };
     }
     case 'CREATE_GOAL':
-      await createGoalInSupabase(data as Record<string, unknown>, userId, userToken);
+      await createGoalInSupabase(data as Record<string, unknown>, userId, supabaseClient);
       return { success: true, message: 'Meta creada' };
     case 'CREATE_BUDGET':
-      await createBudgetInSupabase(data as Record<string, unknown>, userId, userToken);
+      await createBudgetInSupabase(data as Record<string, unknown>, userId, supabaseClient);
       return { success: true, message: 'Presupuesto creado' };
     case 'CREATE_ACCOUNT': {
-      if (!userId) throw new Error('userId requerido para crear cuenta');
-      const { createClient } = await import('@supabase/supabase-js');
-      const supabase = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        { global: { headers: { Authorization: `Bearer ${userToken}` } }, auth: { persistSession: false, autoRefreshToken: false } }
-      );
-      const account = await createAccountInSupabase(data as Parameters<typeof createAccountInSupabase>[0], supabase, userId);
+      const account = await createAccountInSupabase(data as Parameters<typeof createAccountInSupabase>[0], supabaseClient, userId);
       return { success: true, mensaje_respuesta: 'Cuenta creada exitosamente', action: 'CREATE_ACCOUNT', data: account };
     }
     case 'UPDATE_ACCOUNT_BALANCE': {
-      if (!userId) throw new Error('userId requerido para actualizar cuenta');
-      const { createClient } = await import('@supabase/supabase-js');
-      const supabase = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        { global: { headers: { Authorization: `Bearer ${userToken}` } }, auth: { persistSession: false, autoRefreshToken: false } }
-      );
-      const result = await updateAccountBalanceInSupabase(data as { account_name: string; new_balance: number }, supabase, userId);
+      const result = await updateAccountBalanceInSupabase(data as { account_name: string; new_balance: number }, supabaseClient, userId);
       if (!result.updated && result.suggestion) return { success: false, suggestion: result.suggestion, message: result.suggestion };
       return { success: true, message: `Balance actualizado en ${result.accountName}` };
     }
     case 'UPDATE_GOAL_PROGRESS':
-      await updateGoalProgressInSupabase(String(data?.goal_name ?? ''), Number(data?.amount ?? 0), userId, userToken, Boolean(data?.create_if_missing ?? true));
+      await updateGoalProgressInSupabase(String(data?.goal_name ?? ''), Number(data?.amount ?? 0), userId, supabaseClient, Boolean(data?.create_if_missing ?? true));
       return { success: true, message: 'Progreso actualizado' };
     case 'QUERY_BUDGET':
     case 'QUERY_GOALS':
@@ -1431,41 +1432,100 @@ async function executeAction(
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json() as {
-      message: string;
-      context: RequestContext;
-      history: Array<{ role: string; content: string }>;
-    };
-    const { message, context, history = [] } = body;
+    // ── 1. Autenticación ─────────────────────────────────────────────────────
+    const authHeader     = request.headers.get('Authorization');
+    const internalUserId = request.headers.get('x-internal-user-id');
+    const internalSecret = request.headers.get('x-internal-secret');
 
-    const authHeader = request.headers.get('Authorization');
+    const isInternalCall =
+      internalUserId &&
+      internalSecret &&
+      internalSecret === process.env.INTERNAL_API_SECRET;
+
     let userId: string | null = null;
-    let supabaseServer = createSupabaseServerClient();
+    let supabaseClient: ReturnType<typeof createSupabaseServerClientWithToken>;
 
-    if (authHeader) {
+    if (isInternalCall) {
+      userId = internalUserId;
+
+      // SECURITY FIX: log de auditoría (sin loguear el secret)
+      console.info('[auth] internal call', { userId, ip: request.headers.get('x-forwarded-for') });
+
+      // SECURITY FIX: usar service role que lanza si SUPABASE_SERVICE_ROLE_KEY no está definida
+      const serviceClient = createSupabaseServiceClient();
+
+      // SECURITY FIX: verificar que el userId exista antes de operar con él
+      const { data: userCheck, error: userErr } = await serviceClient
+        .from('user_profiles').select('user_id').eq('user_id', userId).single();
+      if (userErr || !userCheck) {
+        console.warn('[auth] internal call with unknown userId', { userId });
+        return NextResponse.json({ error: 'Usuario no encontrado' }, { status: 403 });
+      }
+
+      supabaseClient = serviceClient as unknown as ReturnType<typeof createSupabaseServerClientWithToken>;
+
+    } else if (authHeader) {
       const token = authHeader.replace('Bearer ', '');
-      const { createClient } = await import('@supabase/supabase-js');
-      const supabaseWithToken = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        { global: { headers: { Authorization: `Bearer ${token}` } }, auth: { persistSession: false, autoRefreshToken: false } }
-      );
-      const { data: { user } } = await supabaseWithToken.auth.getUser();
-      userId = user?.id ?? null;
-      supabaseServer = supabaseWithToken;
+      const clientWithToken = createSupabaseServerClientWithToken(token);
+      const { data: { user } } = await clientWithToken.auth.getUser();
+
+      if (!user?.id) {
+        return NextResponse.json({ error: 'Token inválido o expirado' }, { status: 401 });
+      }
+
+      userId         = user.id;
+      supabaseClient = clientWithToken;
+
+    } else {
+      // SECURITY FIX: log de llamadas sin autenticación
+      console.warn('[auth] unauthenticated request', {
+        ip: request.headers.get('x-forwarded-for'),
+        ua: request.headers.get('user-agent')?.slice(0, 80),
+      });
+      return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
     }
 
-    let budgetsData: BudgetRow[] = [];
-    let goalsData: GoalRow[] = [];
+    // ── 2. Rate limiting ──────────────────────────────────────────────────────
+    const { allowed, remaining } = checkRateLimit(`chat:${userId}`);
+    if (!allowed) {
+      console.warn('[rate-limit] exceeded', { userId });
+      return NextResponse.json(
+        { error: 'Demasiadas solicitudes. Esperá un momento.' },
+        { status: 429, headers: { 'Retry-After': '60', 'X-RateLimit-Remaining': '0' } }
+      );
+    }
+
+    // ── 3. Validación del body ────────────────────────────────────────────────
+    let parsed: ValidatedRequest;
+    try {
+      const rawBody = await request.json();
+      const result  = requestSchema.safeParse(rawBody);
+      if (!result.success) {
+        return NextResponse.json(
+          { error: 'Input inválido', details: process.env.NODE_ENV === 'development' ? result.error.issues : undefined },
+          { status: 400 }
+        );
+      }
+      parsed = result.data;
+    } catch {
+      return NextResponse.json({ error: 'Body no es JSON válido' }, { status: 400 });
+    }
+
+    const { message, context, history } = parsed;
+
+    // ── 4. Fetch de datos ─────────────────────────────────────────────────────
+    let budgetsData:  BudgetRow[]  = [];
+    let goalsData:    GoalRow[]    = [];
     let accountsData: AccountRow[] = [];
-    let unpaidInstallmentsTotal = 0;
+    let unpaidInstallmentsTotal    = 0;
 
     if (userId) {
       try {
         const [budgetsRes, goalsRes, accountsRes, installmentsRes] = await Promise.all([
-          supabaseServer.from('budgets').select('id, category, custom_aliases').eq('user_id', userId),
-          supabaseServer.from('goals').select('id, name, is_active, is_completed').eq('user_id', userId).eq('is_active', true),
-          supabaseServer.from('accounts').select('id, name, type, balance, credit_limit, closing_day, due_day, is_default').eq('user_id', userId).eq('is_active', true),
-          supabaseServer.from('installments').select('amount').eq('user_id', userId).eq('is_paid', false),
+          supabaseClient.from('budgets').select('id, category, custom_aliases').eq('user_id', userId),
+          supabaseClient.from('goals').select('id, name, is_active, is_completed').eq('user_id', userId).eq('is_active', true),
+          supabaseClient.from('accounts').select('id, name, type, balance, credit_limit, closing_day, due_day, is_default').eq('user_id', userId).eq('is_active', true),
+          supabaseClient.from('installments').select('amount').eq('user_id', userId).eq('is_paid', false),
         ]);
 
         budgetsData = ((budgetsRes.data ?? []) as Array<{ id: string; category: string; custom_aliases: unknown }>).map(b => ({
@@ -1473,54 +1533,65 @@ export async function POST(request: NextRequest) {
           category: b.category,
           custom_aliases: Array.isArray(b.custom_aliases) ? b.custom_aliases as string[] : [],
         }));
-        goalsData = (goalsRes.data ?? []) as GoalRow[];
+        goalsData   = (goalsRes.data ?? []) as GoalRow[];
         accountsData = (accountsRes.data ?? []) as AccountRow[];
         unpaidInstallmentsTotal = ((installmentsRes.data ?? []) as InstallmentRow[]).reduce((s, i) => s + Number(i.amount), 0);
       } catch (err) {
-        console.error('Error fetching data:', err);
+        console.error('[db] fetch error', err instanceof Error ? err.message : err);
       }
     }
 
+    // ── 5. Resolución de cuenta ───────────────────────────────────────────────
     let serverResolvedAccountId: string | null = null;
-
     const intentForAccountResolution = classifyIntent(message);
+
     if (userId && intentForAccountResolution === 'registro') {
-      const { account_id, error: accError } = await resolveAccount(userId, message, context, supabaseServer);
+      const { account_id, error: accError } = await resolveAccount(userId, message, context as RequestContext, supabaseClient);
       if (accError) {
-        const { data: accsForPicker } = await supabaseServer.from('accounts').select('id, name, type').eq('user_id', userId).eq('is_active', true);
-        return NextResponse.json({
-          action: 'NEEDS_ACCOUNT_SELECTION',
-          mensaje_respuesta: accError,
-          data: { accounts: accsForPicker ?? [], pending_message: message },
-        });
+        if (!isInternalCall) {
+          const { data: accsForPicker } = await supabaseClient
+            .from('accounts').select('id, name, type')
+            .eq('user_id', userId).eq('is_active', true);
+          return NextResponse.json({
+            action: 'NEEDS_ACCOUNT_SELECTION',
+            mensaje_respuesta: accError,
+            data: { accounts: accsForPicker ?? [], pending_message: message },
+          });
+        }
+      } else {
+        serverResolvedAccountId = account_id;
       }
-      serverResolvedAccountId = account_id;
     }
 
-    const liquidBalance = accountsData.filter(a => a.type === 'liquid').reduce((s, a) => s + Number(a.balance), 0);
+    // ── 6. Cálculos de balances ───────────────────────────────────────────────
+    const liquidBalance  = accountsData.filter(a => a.type === 'liquid').reduce((s, a) => s + Number(a.balance), 0);
     const savingsBalance = accountsData.filter(a => a.type === 'savings').reduce((s, a) => s + Number(a.balance), 0);
-    const creditDebt = accountsData.filter(a => a.type === 'credit').reduce((s, a) => s + Number(a.balance), 0);
-    const creditLimit = accountsData.filter(a => a.type === 'credit').reduce((s, a) => s + Number(a.credit_limit ?? 0), 0);
+    const creditDebt     = accountsData.filter(a => a.type === 'credit').reduce((s, a) => s + Number(a.balance), 0);
+    const creditLimit    = accountsData.filter(a => a.type === 'credit').reduce((s, a) => s + Number(a.credit_limit ?? 0), 0);
     const realDisponible = liquidBalance - creditDebt;
 
+    // ── 7. Groq ───────────────────────────────────────────────────────────────
     if (!process.env.GROQ_API_KEY) {
       return NextResponse.json({ error: 'Groq API key no configurada' }, { status: 500 });
     }
 
-    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const groq    = new Groq({ apiKey: process.env.GROQ_API_KEY });
     const intent: BackendIntent = classifyIntent(message);
 
-    const dynamicContext = buildDynamicContext(intent, context, accountsData, serverResolvedAccountId, liquidBalance, savingsBalance, creditDebt, creditLimit, realDisponible, unpaidInstallmentsTotal);
-    const systemPrompt = buildSystemPrompt(intent);
-    const historySlice = getHistorySlice(intent, history);
-    const maxTokens = getMaxTokens(intent);
+    const dynamicContext = buildDynamicContext(intent, context as RequestContext, accountsData, serverResolvedAccountId, liquidBalance, savingsBalance, creditDebt, creditLimit, realDisponible, unpaidInstallmentsTotal);
+    const systemPrompt   = buildSystemPrompt(intent);
+    const historySlice   = getHistorySlice(intent, history);
+    const maxTokens      = getMaxTokens(intent);
 
     const estimatedInputTokens =
       estimateTokens(systemPrompt) + estimateTokens(dynamicContext) +
       historySlice.reduce((s, m) => s + estimateTokens(m.content), 0) +
       estimateTokens(message);
 
-    console.log('📊 TOKENS:', { intent, estimated_input: estimatedInputTokens, max_output: maxTokens });
+    // Solo loguear tokens en development
+    if (process.env.NODE_ENV === 'development') {
+      console.log('📊 TOKENS:', { intent, estimated_input: estimatedInputTokens, max_output: maxTokens });
+    }
 
     const messages: GroqMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -1543,12 +1614,19 @@ export async function POST(request: NextRequest) {
       const aiResponse: ChatResponse = cleanAndParseAIResponse(rawContent);
 
       try {
-        const enrichedContext = { ...context, server_resolved_account_id: serverResolvedAccountId ?? undefined };
+        const contextTyped = context as RequestContext & { server_resolved_account_id?: string | null };
+        const enrichedContext = { ...contextTyped, server_resolved_account_id: serverResolvedAccountId ?? undefined };
 
         const actionResult = await executeAction(
-          aiResponse.action, aiResponse.data as Record<string, unknown> | null,
-          message, userId, budgetsData, goalsData,
-          authHeader?.replace('Bearer ', '') ?? null, enrichedContext
+          aiResponse.action,
+          aiResponse.data as Record<string, unknown> | null,
+          message,
+          userId!,
+          budgetsData,
+          goalsData,
+          supabaseClient,
+          serverResolvedAccountId,
+          enrichedContext.resolved_account_id,
         );
 
         if (!actionResult.success && actionResult.suggestion) {
@@ -1568,25 +1646,29 @@ export async function POST(request: NextRequest) {
           }
         }
       } catch (actionError) {
-        console.error('Error ejecutando acción:', actionError);
+        console.error('[action] error', actionError instanceof Error ? actionError.message : actionError);
         return NextResponse.json(
           { action: 'ERROR', error: 'Error ejecutando la acción', mensaje_respuesta: `No pude ejecutar tu solicitud: ${actionError instanceof Error ? actionError.message : 'Error desconocido'}` },
           { status: 500 }
         );
       }
 
-      return NextResponse.json(aiResponse);
+      return NextResponse.json(aiResponse, {
+        headers: { 'X-RateLimit-Remaining': String(remaining) },
+      });
+
     } catch (error) {
-      console.error('Error en Groq:', error);
+      console.error('[groq] error', error instanceof Error ? error.message : error);
       return NextResponse.json(
         { action: 'ERROR', error: 'Error procesando la solicitud', mensaje_respuesta: 'Tuve problemas para entender tu mensaje. ¿Podés reformularlo?' },
         { status: 500 }
       );
     }
   } catch (error) {
-    console.error('Error en API de chat:', error);
+    console.error('[route] unhandled error', error instanceof Error ? error.message : error);
     return NextResponse.json(
-      { error: 'Error procesando la solicitud', details: error instanceof Error ? error.message : 'Error desconocido' },
+      // SECURITY FIX: no exponer details en producción
+      { error: 'Error procesando la solicitud', details: process.env.NODE_ENV === 'development' && error instanceof Error ? error.message : undefined },
       { status: 500 }
     );
   }

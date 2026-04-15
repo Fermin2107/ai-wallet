@@ -49,7 +49,6 @@ export async function POST(request: NextRequest) {
 
           if (!text.trim()) continue
 
-          // Cliente tipado explícitamente para evitar colapso a never
           const supabase: SupabaseClient = createClient(
             process.env.NEXT_PUBLIC_SUPABASE_URL!,
             process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -88,8 +87,15 @@ export async function POST(request: NextRequest) {
             `${process.env.NEXT_PUBLIC_APP_URL}/api/chat`,
             {
               method:  'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body:    JSON.stringify({
+              headers: {
+                'Content-Type':       'application/json',
+                // Estos dos headers le dicen a /api/chat que la llamada
+                // viene del backend interno y quién es el usuario.
+                // /api/chat valida el secret antes de usarlos.
+                'x-internal-user-id': whatsappConfig.user_id,
+                'x-internal-secret':  process.env.INTERNAL_API_SECRET!,
+              },
+              body: JSON.stringify({
                 message: text,
                 context: {
                   ...contextData,
@@ -164,7 +170,6 @@ async function sendWhatsappReply(
   }
 }
 
-// Tipos internos para evitar colapso a never
 interface OnboardingRow {
   ingreso_mensual: number
   objetivo_ahorro: number
@@ -220,15 +225,14 @@ async function buildContextForUser(
     const transactions = (txRes.data ?? []) as TransactionRow[]
     const budgets      = (budgetsRes.data ?? []) as BudgetRow[]
     const goals        = (goalsRes.data ?? []) as GoalRow[]
-    // Cast explícito para evitar colapso a never
     const onboarding   = onboardingRes.data as OnboardingRow | null
 
     const txMes = transactions.filter((t) =>
       t.transaction_date.startsWith(selectedMonth)
     )
 
-    const totalGastado   = txMes.filter((t) => t.type === 'gasto').reduce((s, t) => s + t.amount, 0)
-    const totalIngresado = txMes.filter((t) => t.type === 'ingreso').reduce((s, t) => s + t.amount, 0)
+    const totalGastado    = txMes.filter((t) => t.type === 'gasto').reduce((s, t) => s + t.amount, 0)
+    const totalIngresado  = txMes.filter((t) => t.type === 'ingreso').reduce((s, t) => s + t.amount, 0)
     const ingresoEfectivo = totalIngresado > 0 ? totalIngresado : (onboarding?.ingreso_mensual ?? 0)
     const objetivoAhorro  = onboarding?.objetivo_ahorro ?? 0
     const dineroLibre     = Math.max(0, ingresoEfectivo - totalGastado - objetivoAhorro)
@@ -263,8 +267,6 @@ async function buildContextForUser(
     return { fecha_hoy: new Date().toISOString().split('T')[0] }
   }
 }
-
-// ─── Tipos Meta Webhook ───────────────────────────────────────────────────────
 
 interface MetaWebhookPayload {
   object: string
