@@ -41,7 +41,11 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json() as MetaWebhookPayload
 
+    // 🔍 LOG 1: payload crudo de Meta
+    console.log('[whatsapp-debug] Payload recibido:', JSON.stringify(body).slice(0, 500))
+
     if (body.object !== 'whatsapp_business_account') {
+      console.log('[whatsapp-debug] Objeto ignorado:', body.object)
       return NextResponse.json({ status: 'ignored' })
     }
 
@@ -49,29 +53,53 @@ export async function POST(request: NextRequest) {
       for (const change of entry.changes ?? []) {
         const value = change.value
 
-        if (!value.messages || value.messages.length === 0) continue
+        // 🔍 LOG 2: contenido del change
+        console.log('[whatsapp-debug] Change value keys:', Object.keys(value))
+        console.log('[whatsapp-debug] messages[]:', JSON.stringify(value.messages ?? null))
+
+        if (!value.messages || value.messages.length === 0) {
+          console.log('[whatsapp-debug] Sin mensajes en este change, saltando.')
+          continue
+        }
 
         for (const msg of value.messages) {
-          if (msg.type !== 'text') continue
+          // 🔍 LOG 3: mensaje individual
+          console.log('[whatsapp-debug] Mensaje recibido — from:', msg.from, '| type:', msg.type, '| text:', msg.text?.body)
+
+          if (msg.type !== 'text') {
+            console.log('[whatsapp-debug] Tipo no es texto, saltando:', msg.type)
+            continue
+          }
 
           const fromPhone = msg.from
           const text      = msg.text?.body ?? ''
-          if (!text.trim()) continue
+          if (!text.trim()) {
+            console.log('[whatsapp-debug] Texto vacío, saltando.')
+            continue
+          }
 
           const supabase: SupabaseClient = createClient(
             process.env.NEXT_PUBLIC_SUPABASE_URL!,
             process.env.SUPABASE_SERVICE_ROLE_KEY!
           )
 
-          // ── Buscar usuario por número ───────────────────────────────────
-          const { data: config } = await supabase
+          // 🔍 LOG 4: número con el que se busca en Supabase
+          const phoneToSearch = `+${fromPhone}`
+          console.log('[whatsapp-debug] Buscando usuario con phone:', phoneToSearch)
+
+          const { data: config, error: configError } = await supabase
             .from('user_whatsapp_config')
             .select('user_id, nombre')
-            .eq('phone_number', `+${fromPhone}`)
+            .eq('phone_number', phoneToSearch)
             .eq('is_active', true)
             .single()
 
+          // 🔍 LOG 5: resultado de la búsqueda
+          console.log('[whatsapp-debug] Config encontrada:', JSON.stringify(config))
+          console.log('[whatsapp-debug] Config error:', configError?.message ?? 'ninguno')
+
           if (!config) {
+            console.log('[whatsapp-debug] Usuario no encontrado, enviando mensaje de onboarding.')
             await sendWhatsappReply(
               fromPhone,
               'Para conectar tu cuenta de AI Wallet con WhatsApp, abrí la app y activá las notificaciones.',
@@ -83,6 +111,7 @@ export async function POST(request: NextRequest) {
 
           const whatsappConfig = config as { user_id: string; nombre: string | null }
           const userId         = whatsappConfig.user_id
+          console.log('[whatsapp-debug] Usuario encontrado — userId:', userId, '| nombre:', whatsappConfig.nombre)
 
           // Castear supabase al tipo esperado por el engine
           const supabaseClient = supabase as unknown as ReturnType<typeof createSupabaseServerClientWithToken>
@@ -94,12 +123,21 @@ export async function POST(request: NextRequest) {
           let unpaidInstallmentsTotal    = 0
 
           try {
+            console.log('[whatsapp-debug] Fetching datos del usuario...')
             const [budgetsRes, goalsRes, accountsRes, installmentsRes] = await Promise.all([
               supabase.from('budgets').select('id, category, custom_aliases').eq('user_id', userId),
               supabase.from('goals').select('id, name, is_active, is_completed').eq('user_id', userId).eq('is_active', true),
               supabase.from('accounts').select('id, name, type, balance, credit_limit, closing_day, due_day, is_default').eq('user_id', userId).eq('is_active', true),
               supabase.from('installments').select('amount').eq('user_id', userId).eq('is_paid', false),
             ])
+
+            // 🔍 LOG 6: errores en los fetches
+            if (budgetsRes.error)      console.log('[whatsapp-debug] Error budgets:', budgetsRes.error.message)
+            if (goalsRes.error)        console.log('[whatsapp-debug] Error goals:', goalsRes.error.message)
+            if (accountsRes.error)     console.log('[whatsapp-debug] Error accounts:', accountsRes.error.message)
+            if (installmentsRes.error) console.log('[whatsapp-debug] Error installments:', installmentsRes.error.message)
+
+            console.log('[whatsapp-debug] Counts — budgets:', budgetsRes.data?.length, '| goals:', goalsRes.data?.length, '| accounts:', accountsRes.data?.length, '| installments:', installmentsRes.data?.length)
 
             budgetsData = ((budgetsRes.data ?? []) as Array<{ id: string; category: string; custom_aliases: unknown }>).map(b => ({
               id: b.id,
@@ -115,23 +153,29 @@ export async function POST(request: NextRequest) {
 
           // ── Contexto financiero ─────────────────────────────────────────
           const selectedMonth = new Date().toISOString().slice(0, 7)
+          console.log('[whatsapp-debug] Construyendo contexto para mes:', selectedMonth)
           const contextData   = await buildContextForUser(userId, supabase, selectedMonth)
           const context: RequestContext = {
             ...contextData,
             nombre_usuario: whatsappConfig.nombre ?? '',
             canal: 'whatsapp',
           }
+          console.log('[whatsapp-debug] Contexto construido. dinero_libre:', contextData.dinero_libre, '| budgets#:', (contextData.budgets as unknown[])?.length)
 
           // ── Resolución de cuenta ────────────────────────────────────────
           let serverResolvedAccountId: string | null = null
           const intent = classifyIntent(text)
+          console.log('[whatsapp-debug] Intent clasificado:', intent)
 
           if (intent === 'registro') {
+            console.log('[whatsapp-debug] Resolviendo cuenta...')
             const { account_id } = await resolveAccount(userId, text, context, supabaseClient)
             serverResolvedAccountId = account_id
+            console.log('[whatsapp-debug] Cuenta resuelta:', serverResolvedAccountId)
           }
 
           // ── Correr el engine ────────────────────────────────────────────
+          console.log('[whatsapp-debug] Corriendo AI engine...')
           const { aiResponse } = await runAIEngine({
             message:                 text,
             context,
@@ -147,8 +191,10 @@ export async function POST(request: NextRequest) {
           })
 
           const respuesta = aiResponse.mensaje_respuesta
+          console.log('[whatsapp-debug] Respuesta del engine:', respuesta?.slice(0, 150))
 
           if (respuesta) {
+            console.log('[whatsapp-debug] Enviando reply a:', fromPhone)
             await sendWhatsappReply(
               fromPhone,
               respuesta,
@@ -161,6 +207,9 @@ export async function POST(request: NextRequest) {
               trigger_type: 'user_reply',
               message_sent: respuesta,
             })
+            console.log('[whatsapp-debug] ✅ Flujo completo OK')
+          } else {
+            console.log('[whatsapp-debug] ⚠️ Engine no devolvió respuesta (mensaje_respuesta vacío)')
           }
         }
       }
@@ -168,7 +217,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ status: 'ok' })
   } catch (err) {
-    console.error('Error en webhook WhatsApp:', err)
+    console.error('[whatsapp-debug] ❌ Error no capturado en webhook:', err)
     return NextResponse.json({ status: 'error_handled' })
   }
 }
@@ -201,6 +250,8 @@ async function sendWhatsappReply(
     if (!res.ok) {
       const errText = await res.text()
       console.error('[whatsapp] Meta API error:', res.status, errText)
+    } else {
+      console.log('[whatsapp-debug] Meta API reply enviado OK a:', to)
     }
   } catch (err) {
     console.error('[whatsapp] Error enviando reply:', err)
@@ -243,10 +294,18 @@ async function buildContextForUser(
       supabase.from('onboarding_profiles').select('ingreso_mensual, objetivo_ahorro').eq('user_id', userId).single(),
     ])
 
+    // 🔍 LOG 7: errores en buildContext
+    if (txRes.error)         console.log('[whatsapp-debug] buildContext error transactions:', txRes.error.message)
+    if (budgetsRes.error)    console.log('[whatsapp-debug] buildContext error budgets:', budgetsRes.error.message)
+    if (goalsRes.error)      console.log('[whatsapp-debug] buildContext error goals:', goalsRes.error.message)
+    if (onboardingRes.error) console.log('[whatsapp-debug] buildContext error onboarding:', onboardingRes.error.message)
+
     const transactions = (txRes.data ?? []) as TransactionRow[]
     const budgets      = (budgetsRes.data ?? []) as BudgetContextRow[]
     const goals        = (goalsRes.data ?? []) as GoalContextRow[]
     const onboarding   = onboardingRes.data as OnboardingRow | null
+
+    console.log('[whatsapp-debug] buildContext — tx#:', transactions.length, '| onboarding:', JSON.stringify(onboarding))
 
     const txMes = transactions.filter(t => t.transaction_date.startsWith(selectedMonth))
 
@@ -282,7 +341,8 @@ async function buildContextForUser(
         faltante: Math.max(0, g.target_amount - g.current_amount),
       })),
     }
-  } catch {
+  } catch (err) {
+    console.error('[whatsapp-debug] buildContext excepción:', err)
     return { fecha_hoy: new Date().toISOString().split('T')[0] }
   }
 }
