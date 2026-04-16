@@ -5,6 +5,17 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
+import {
+  classifyIntent,
+  resolveAccount,
+  runAIEngine,
+  BudgetRow,
+  GoalRow,
+  AccountRow,
+  InstallmentRow,
+  RequestContext,
+} from '../../../lib/ai-engine'
+import { createSupabaseServerClientWithToken } from '../../../lib/supabase'
 
 const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN!
 
@@ -12,7 +23,6 @@ const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN!
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
-
   const mode      = searchParams.get('hub.mode')
   const token     = searchParams.get('hub.verify_token')
   const challenge = searchParams.get('hub.challenge')
@@ -46,7 +56,6 @@ export async function POST(request: NextRequest) {
 
           const fromPhone = msg.from
           const text      = msg.text?.body ?? ''
-
           if (!text.trim()) continue
 
           const supabase: SupabaseClient = createClient(
@@ -54,6 +63,7 @@ export async function POST(request: NextRequest) {
             process.env.SUPABASE_SERVICE_ROLE_KEY!
           )
 
+          // ── Buscar usuario por número ───────────────────────────────────
           const { data: config } = await supabase
             .from('user_whatsapp_config')
             .select('user_id, nombre')
@@ -72,48 +82,71 @@ export async function POST(request: NextRequest) {
           }
 
           const whatsappConfig = config as { user_id: string; nombre: string | null }
+          const userId         = whatsappConfig.user_id
 
-          await supabase
-            .from('whatsapp_messages_log')
-            .update({ was_replied: true })
-            .eq('user_id', whatsappConfig.user_id)
-            .order('sent_at', { ascending: false })
-            .limit(1)
+          // Castear supabase al tipo esperado por el engine
+          const supabaseClient = supabase as unknown as ReturnType<typeof createSupabaseServerClientWithToken>
 
-          const selectedMonth = new Date().toISOString().slice(0, 7)
-          const contextData   = await buildContextForUser(whatsappConfig.user_id, supabase, selectedMonth)
+          // ── Fetch de datos del usuario ──────────────────────────────────
+          let budgetsData:  BudgetRow[]  = []
+          let goalsData:    GoalRow[]    = []
+          let accountsData: AccountRow[] = []
+          let unpaidInstallmentsTotal    = 0
 
-          const chatResponse = await fetch(
-            `${process.env.NEXT_PUBLIC_APP_URL}/api/chat`,
-            {
-              method:  'POST',
-              headers: {
-                'Content-Type':       'application/json',
-                // Estos dos headers le dicen a /api/chat que la llamada
-                // viene del backend interno y quién es el usuario.
-                // /api/chat valida el secret antes de usarlos.
-                'x-internal-user-id': whatsappConfig.user_id,
-                'x-internal-secret':  process.env.INTERNAL_API_SECRET!,
-              },
-              body: JSON.stringify({
-                message: text,
-                context: {
-                  ...contextData,
-                  nombre_usuario: whatsappConfig.nombre ?? '',
-                  canal: 'whatsapp',
-                },
-                history: [],
-              }),
-            }
-          )
+          try {
+            const [budgetsRes, goalsRes, accountsRes, installmentsRes] = await Promise.all([
+              supabase.from('budgets').select('id, category, custom_aliases').eq('user_id', userId),
+              supabase.from('goals').select('id, name, is_active, is_completed').eq('user_id', userId).eq('is_active', true),
+              supabase.from('accounts').select('id, name, type, balance, credit_limit, closing_day, due_day, is_default').eq('user_id', userId).eq('is_active', true),
+              supabase.from('installments').select('amount').eq('user_id', userId).eq('is_paid', false),
+            ])
 
-          if (!chatResponse.ok) {
-            console.error('Error llamando a /api/chat desde webhook WhatsApp')
-            continue
+            budgetsData = ((budgetsRes.data ?? []) as Array<{ id: string; category: string; custom_aliases: unknown }>).map(b => ({
+              id: b.id,
+              category: b.category,
+              custom_aliases: Array.isArray(b.custom_aliases) ? b.custom_aliases as string[] : [],
+            }))
+            goalsData    = (goalsRes.data ?? []) as GoalRow[]
+            accountsData = (accountsRes.data ?? []) as AccountRow[]
+            unpaidInstallmentsTotal = ((installmentsRes.data ?? []) as InstallmentRow[]).reduce((s, i) => s + Number(i.amount), 0)
+          } catch (err) {
+            console.error('[whatsapp-webhook] fetch error', err instanceof Error ? err.message : err)
           }
 
-          const chatData = await chatResponse.json()
-          const respuesta = chatData.mensaje_respuesta as string | undefined
+          // ── Contexto financiero ─────────────────────────────────────────
+          const selectedMonth = new Date().toISOString().slice(0, 7)
+          const contextData   = await buildContextForUser(userId, supabase, selectedMonth)
+          const context: RequestContext = {
+            ...contextData,
+            nombre_usuario: whatsappConfig.nombre ?? '',
+            canal: 'whatsapp',
+          }
+
+          // ── Resolución de cuenta ────────────────────────────────────────
+          let serverResolvedAccountId: string | null = null
+          const intent = classifyIntent(text)
+
+          if (intent === 'registro') {
+            const { account_id } = await resolveAccount(userId, text, context, supabaseClient)
+            serverResolvedAccountId = account_id
+          }
+
+          // ── Correr el engine ────────────────────────────────────────────
+          const { aiResponse } = await runAIEngine({
+            message:                 text,
+            context,
+            history:                 [],
+            userId,
+            budgetsData,
+            goalsData,
+            accountsData,
+            serverResolvedAccountId,
+            unpaidInstallmentsTotal,
+            canal:                   'whatsapp',
+            supabaseClient,
+          })
+
+          const respuesta = aiResponse.mensaje_respuesta
 
           if (respuesta) {
             await sendWhatsappReply(
@@ -124,7 +157,7 @@ export async function POST(request: NextRequest) {
             )
 
             await supabase.from('whatsapp_messages_log').insert({
-              user_id:      whatsappConfig.user_id,
+              user_id:      userId,
               trigger_type: 'user_reply',
               message_sent: respuesta,
             })
@@ -149,7 +182,7 @@ async function sendWhatsappReply(
   phoneNumberId: string
 ): Promise<void> {
   try {
-    await fetch(
+    const res = await fetch(
       `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
       {
         method:  'POST',
@@ -165,8 +198,12 @@ async function sendWhatsappReply(
         }),
       }
     )
+    if (!res.ok) {
+      const errText = await res.text()
+      console.error('[whatsapp] Meta API error:', res.status, errText)
+    }
   } catch (err) {
-    console.error('Error enviando reply WhatsApp:', err)
+    console.error('[whatsapp] Error enviando reply:', err)
   }
 }
 
@@ -182,12 +219,12 @@ interface TransactionRow {
   transaction_date: string
 }
 
-interface BudgetRow {
+interface BudgetContextRow {
   category:     string
   limit_amount: number
 }
 
-interface GoalRow {
+interface GoalContextRow {
   name:           string
   target_amount:  number
   current_amount: number
@@ -200,39 +237,21 @@ async function buildContextForUser(
 ): Promise<Record<string, unknown>> {
   try {
     const [txRes, budgetsRes, goalsRes, onboardingRes] = await Promise.all([
-      supabase
-        .from('transactions')
-        .select('type, amount, category, transaction_date')
-        .eq('user_id', userId),
-      supabase
-        .from('budgets')
-        .select('category, limit_amount, month_period')
-        .eq('user_id', userId)
-        .eq('month_period', selectedMonth),
-      supabase
-        .from('goals')
-        .select('name, target_amount, current_amount')
-        .eq('user_id', userId)
-        .eq('is_active', true)
-        .eq('is_completed', false),
-      supabase
-        .from('onboarding_profiles')
-        .select('ingreso_mensual, objetivo_ahorro')
-        .eq('user_id', userId)
-        .single(),
+      supabase.from('transactions').select('type, amount, category, transaction_date').eq('user_id', userId),
+      supabase.from('budgets').select('category, limit_amount, month_period').eq('user_id', userId).eq('month_period', selectedMonth),
+      supabase.from('goals').select('name, target_amount, current_amount').eq('user_id', userId).eq('is_active', true).eq('is_completed', false),
+      supabase.from('onboarding_profiles').select('ingreso_mensual, objetivo_ahorro').eq('user_id', userId).single(),
     ])
 
     const transactions = (txRes.data ?? []) as TransactionRow[]
-    const budgets      = (budgetsRes.data ?? []) as BudgetRow[]
-    const goals        = (goalsRes.data ?? []) as GoalRow[]
+    const budgets      = (budgetsRes.data ?? []) as BudgetContextRow[]
+    const goals        = (goalsRes.data ?? []) as GoalContextRow[]
     const onboarding   = onboardingRes.data as OnboardingRow | null
 
-    const txMes = transactions.filter((t) =>
-      t.transaction_date.startsWith(selectedMonth)
-    )
+    const txMes = transactions.filter(t => t.transaction_date.startsWith(selectedMonth))
 
-    const totalGastado    = txMes.filter((t) => t.type === 'gasto').reduce((s, t) => s + t.amount, 0)
-    const totalIngresado  = txMes.filter((t) => t.type === 'ingreso').reduce((s, t) => s + t.amount, 0)
+    const totalGastado    = txMes.filter(t => t.type === 'gasto').reduce((s, t) => s + t.amount, 0)
+    const totalIngresado  = txMes.filter(t => t.type === 'ingreso').reduce((s, t) => s + t.amount, 0)
     const ingresoEfectivo = totalIngresado > 0 ? totalIngresado : (onboarding?.ingreso_mensual ?? 0)
     const objetivoAhorro  = onboarding?.objetivo_ahorro ?? 0
     const dineroLibre     = Math.max(0, ingresoEfectivo - totalGastado - objetivoAhorro)
@@ -250,17 +269,17 @@ async function buildContextForUser(
       gasto_diario_recomendado: diasRestantes > 0 ? Math.round(dineroLibre / diasRestantes) : 0,
       dias_restantes:           diasRestantes,
       estado_mes:               dineroLibre > 0 ? 'bien' : 'mal',
-      budgets: budgets.map((b) => ({
+      budgets: budgets.map(b => ({
         categoria: b.category,
         limite:    b.limit_amount,
-        gastado:   txMes
-          .filter((t) => t.type === 'gasto' && t.category === b.category)
-          .reduce((s, t) => s + t.amount, 0),
+        gastado:   txMes.filter(t => t.type === 'gasto' && t.category === b.category).reduce((s, t) => s + t.amount, 0),
+        estado:    'ok',
       })),
-      goals: goals.map((g) => ({
+      goals: goals.map(g => ({
         nombre:   g.name,
         objetivo: g.target_amount,
         actual:   g.current_amount,
+        faltante: Math.max(0, g.target_amount - g.current_amount),
       })),
     }
   } catch {
